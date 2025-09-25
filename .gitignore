@@ -1,0 +1,37 @@
+# Kalkidan's private learning notes, day reports and commit scripts.
+notes/
+
+# Secrets. Only .env.example (fake values) is committed.
+.env
+.env.*
+!.env.example
+
+# Go
+backend/bin/
+*.test
+coverage.out
+coverage.html
+
+# Flutter / Dart
+mobile/build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+*.iml
+mobile/android/.gradle/
+mobile/android/local.properties
+mobile/android/key.properties
+mobile/ios/Pods/
+mobile/ios/.symlinks/
+
+# Android signing keys never go in the repo.
+*.jks
+*.keystore
+
+# Editors and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
