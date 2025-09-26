@@ -17,37 +17,28 @@ Flutter app (Android first) · Go backend · PostgreSQL with pgvector · Docker 
 
 | Folder | What goes there |
 |---|---|
-| `backend/` | Go service (API, worker, admin website) |
-| `mobile/` | Flutter app |
-| `design/` | Figma exports, screen inventory and design gaps ([SCREENS.md](design/SCREENS.md), [GAPS.md](design/GAPS.md)) |
-| `content/` | Articles, audio, video and programs with licence info |
-| `docs/` | Architecture, product, safety and privacy docs |
-| `bench/results/` | Raw output of every measurement |
-| `scripts/` | Developer scripts |
-| `site/` | Project website |
+| `backend/` | Go service (API, worker, admin website), from the first weeks |
+| `mobile/` | Flutter app, from the first weeks |
 
 ## First steps after cloning
 
 ```bash
-make hooks   # turn on the commit-message checker
-make test    # run every test
 make help    # list all commands
+make test    # run every test
 ```
 
 ## Commit messages
 
-Every commit follows the Angular format, and the `commit-msg` hook (`make hooks`) rejects anything else:
+Every commit follows the Angular format:
 
 ```
 <type>(<scope>): <subject>
 
 <body: why this change, lines wrapped at 72 characters>
-
-Refs: day-NNN
 ```
 
 - Header at most 72 characters; subject in the imperative ("add", not "added"), lowercase start, no period.
-- A body is required. The `Refs: day-NNN` footer and a `BREAKING CHANGE: ...` line are optional.
+- A body is required. A `BREAKING CHANGE: ...` footer is added when a change breaks API clients.
 - **type:** `feat` · `fix` · `refactor` · `perf` · `test` · `docs` · `build` · `ci` · `style` · `chore`
 - **scope:** `infra` · `api` · `db` · `auth` · `profile` · `checkin` · `mood` · `goals` · `habits` · `badges` ·
   `recovery` · `sos` · `garden` · `journal` · `programs` · `library` · `media` · `ai` · `community` · `buddy` ·
