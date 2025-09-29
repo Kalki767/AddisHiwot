@@ -1,0 +1,71 @@
+# Local development stack: database, email catcher and file storage.
+# Start with `make up`; settings come from .env (see .env.example).
+# Images are pinned by tag and digest so every machine runs the same bytes.
+
+name: addishiwot
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg18-trixie@sha256:9d9c930220cb9bf2f956d10a8f909cf9973d9672ca0278aef2c1e6facccad2e0
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # PostgreSQL 18 images keep their data in a versioned folder below this path.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # Ask over TCP: during first start-up the image runs a temporary server that
+      # only listens on a socket, so a socket check would report "ready" too early.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.32.0@sha256:0790692be935ea4420d085694f7985b1f692ca6a8771ab0e0bd8ba75ac180498
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: 5000
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MAILPIT_UI_PORT:-8025}:8025"
+    volumes:
+      - mailpit-data:/data
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  minio:
+    # Community-maintained MinIO build: the upstream image stopped receiving
+    # updates in October 2025. The app only speaks S3, so this is swappable.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_API_PORT:-9000}:9000"
+      - "${BIND_ADDRESS:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  mailpit-data:
+  minio-data:
