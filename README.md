@@ -27,6 +27,25 @@ make help    # list all commands
 make test    # run every test
 ```
 
+## Run it locally
+
+Needs Docker with Compose v2. `make up` creates `.env` from `.env.example` the first time, starts the
+services below and waits until each one reports healthy.
+
+| Service | What it is for | Default address (ports set in `.env`) |
+|---|---|---|
+| PostgreSQL 18 + pgvector | App data, job queue, AI search vectors | `127.0.0.1:5433` · `make psql` opens a shell |
+| Mailpit | Catches every email sent in development | inbox at `http://127.0.0.1:8025`, SMTP on `1025` |
+| MinIO (community build) | S3-compatible storage for audio, video and images | API `127.0.0.1:9000`, console `:9001` |
+
+```bash
+make up       # start and wait for healthy
+make ps       # status
+make logs     # follow logs
+make down     # stop, keep data
+make down-v   # stop and delete all local data
+```
+
 ## Commit messages
 
 Every commit follows the Angular format:
