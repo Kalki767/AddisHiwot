@@ -1,0 +1,7 @@
+# Keep the build context small and free of local files.
+bin/
+coverage.out
+coverage.html
+*.test
+.env
+.env.*
