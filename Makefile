@@ -3,6 +3,11 @@
 
 SHELL := /usr/bin/env bash
 COMPOSE := docker compose
+# golangci-lint runs from its pinned image; the two volumes cache Go modules,
+# the Go toolchain and lint results between runs.
+GOLANGCI := docker run --rm -v $(CURDIR)/backend:/app -w /app \
+	-v ah-golangci-cache:/root/.cache -v ah-go-mod:/go/pkg/mod \
+	golangci/golangci-lint:v2.15.0@sha256:fbfcfd12a6f8d7f1b97b3362ca80fc2a244d46863148c73cb88e7793af96c481
 
 .DEFAULT_GOAL := help
 .PHONY: help test lint env-check up down down-v ps logs psql mobile-test e2e ai-smoke ai-eval
@@ -10,10 +15,12 @@ COMPOSE := docker compose
 help: ## List the available commands
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
 
-test: ## Run every test (placeholder, Day 5)
-	@echo "make test: no tests yet, the Go tests arrive on Day 5"
+test: ## Run every test (Go, with the race detector)
+	cd backend && go test -race -count=1 ./...
 
-lint: ## Run the linters (Go linters arrive on Day 5)
+lint: ## Run go vet, golangci-lint and check docker-compose.yml
+	cd backend && go vet ./...
+	$(GOLANGCI) golangci-lint run ./...
 	$(COMPOSE) --env-file .env.example config --quiet
 	@echo "docker-compose.yml: valid"
 
@@ -32,8 +39,8 @@ env-check: .env ## Fail if .env lacks a setting that .env.example has
 		exit 1; \
 	fi
 
-up: env-check ## Start the local Docker stack and wait until every container is healthy
-	$(COMPOSE) up --detach --wait
+up: env-check ## Build the API, start the local Docker stack and wait until every container is healthy
+	$(COMPOSE) up --detach --build --wait
 
 down: ## Stop the local Docker stack (data is kept)
 	$(COMPOSE) down
