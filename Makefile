@@ -5,7 +5,7 @@ SHELL := /usr/bin/env bash
 COMPOSE := docker compose
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint up down down-v ps logs psql mobile-test e2e ai-smoke ai-eval
+.PHONY: help test lint env-check up down down-v ps logs psql mobile-test e2e ai-smoke ai-eval
 
 help: ## List the available commands
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -22,7 +22,17 @@ lint: ## Run the linters (Go linters arrive on Day 5)
 	cp .env.example .env
 	@echo "Created .env from .env.example. Change the passwords in it if you like."
 
-up: .env ## Start the local Docker stack and wait until every container is healthy
+# .env is never overwritten, so settings added to .env.example later must be copied by hand.
+env-check: .env ## Fail if .env lacks a setting that .env.example has
+	@missing=$$(comm -23 <(grep -oE '^[A-Z0-9_]+=' .env.example | sort -u) <(grep -oE '^[A-Z0-9_]+=' .env | sort -u) | tr -d '='); \
+	if [ -n "$$missing" ]; then \
+		echo "Your .env is missing settings that .env.example has:"; \
+		echo "$$missing" | sed 's/^/  /'; \
+		echo "Copy them from .env.example into .env, then run the command again."; \
+		exit 1; \
+	fi
+
+up: env-check ## Start the local Docker stack and wait until every container is healthy
 	$(COMPOSE) up --detach --wait
 
 down: ## Stop the local Docker stack (data is kept)
