@@ -22,18 +22,25 @@ Flutter app (Android first) · Go backend · PostgreSQL with pgvector · Docker 
 
 ## First steps after cloning
 
+Needs Docker with Compose v2, Go (any recent version: Go downloads the 1.27.3 toolchain that `backend/go.mod`
+asks for) and make.
+
 ```bash
 make help    # list all commands
-make test    # run every test
+make test    # Go tests with the race detector
+make lint    # go vet + golangci-lint (pinned Docker image) + compose file check
+make up      # start the API and its services
 ```
 
 ## Run it locally
 
-Needs Docker with Compose v2. `make up` creates `.env` from `.env.example` the first time, starts the
-services below and waits until each one reports healthy.
+`make up` creates `.env` from `.env.example` the first time, builds the API image, starts the services below
+and waits until each one reports healthy. If `.env.example` later gains a setting your `.env` lacks, `make up`
+stops and lists it.
 
 | Service | What it is for | Default address (ports set in `.env`) |
 |---|---|---|
+| API (Go) | The backend: `/healthz` (process alive), `/readyz` (database reachable) | `http://127.0.0.1:8080` |
 | PostgreSQL 18 + pgvector | App data, job queue, AI search vectors | `127.0.0.1:5433` · `make psql` opens a shell |
 | Mailpit | Catches every email sent in development | inbox at `http://127.0.0.1:8025`, SMTP on `1025` |
 | MinIO (community build) | S3-compatible storage for audio, video and images | API `127.0.0.1:9000`, console `:9001` |
