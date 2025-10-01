@@ -65,6 +65,21 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # One-shot: applies pending migrations, then exits. The api waits for it.
+  migrate:
+    build:
+      context: ./backend
+    image: addishiwot-api:dev
+    entrypoint: ["/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true # the image's check is for the api; this container just runs and exits
+    restart: "no"
+
   api:
     build:
       context: ./backend
@@ -79,6 +94,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # Longer than SHUTDOWN_TIMEOUT (15s) so requests in flight can finish before Docker kills the process.
     stop_grace_period: 20s
     restart: unless-stopped

@@ -1,4 +1,4 @@
-# API image, built in two stages.
+# API image (also holds the migrate command), built in two stages.
 # 1. build: compile a static Go binary with the full Go toolchain.
 # 2. run:   copy only that binary into distroless (no shell, no package manager,
 #           runs as a non-root user), so the image has almost nothing to attack.
@@ -13,10 +13,10 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/api ./cmd/migrate
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
-COPY --from=build /out/api /api
+COPY --from=build /out/api /out/migrate /
 USER nonroot:nonroot
 EXPOSE 8080
 # No curl in this image: the binary checks its own /readyz.

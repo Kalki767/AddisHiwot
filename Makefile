@@ -8,21 +8,44 @@ COMPOSE := docker compose
 GOLANGCI := docker run --rm -v $(CURDIR)/backend:/app -w /app \
 	-v ah-golangci-cache:/root/.cache -v ah-go-mod:/go/pkg/mod \
 	golangci/golangci-lint:v2.15.0@sha256:fbfcfd12a6f8d7f1b97b3362ca80fc2a244d46863148c73cb88e7793af96c481
+# sqlc runs as the current user so generated files are not owned by root.
+SQLC := docker run --rm --user $$(id -u):$$(id -g) -v $(CURDIR)/backend:/src -w /src \
+	sqlc/sqlc:1.31.1@sha256:70f53171d27b2424e9358869975455a6e955a5aa8e58a998a270a6e34e525537
+# Loads .env and sets DB_HOST, the address to reach the published postgres port from this machine.
+WITH_ENV := set -a && . ./.env && set +a && DB_HOST=$${BIND_ADDRESS:-127.0.0.1} && \
+	if [ "$$DB_HOST" = 0.0.0.0 ]; then DB_HOST=127.0.0.1; fi &&
+HOST_DB_URL = postgres://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${DB_HOST}:$${POSTGRES_PORT}
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint env-check up down down-v ps logs psql mobile-test e2e ai-smoke ai-eval
+.PHONY: help test lint generate migrate-up migrate-down migrate-version env-check up down down-v ps logs psql mobile-test e2e ai-smoke ai-eval
 
 help: ## List the available commands
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
 
-test: ## Run every test (Go, with the race detector)
-	cd backend && go test -race -count=1 ./...
+test: env-check ## Run every test (Go, race detector, database tests against the dev postgres)
+	$(COMPOSE) up --detach --wait postgres
+	$(WITH_ENV) cd backend && TEST_REQUIRE_DB=1 TEST_DATABASE_URL="$(HOST_DB_URL)/postgres?sslmode=disable" \
+		go test -race -count=1 ./...
 
 lint: ## Run go vet, golangci-lint and check docker-compose.yml
 	cd backend && go vet ./...
 	$(GOLANGCI) golangci-lint run ./...
+	$(SQLC) diff
+	@echo "internal/db: matches queries/ and migrations/"
 	$(COMPOSE) --env-file .env.example config --quiet
 	@echo "docker-compose.yml: valid"
+
+generate: ## Regenerate internal/db from queries/ and migrations/ with sqlc
+	$(SQLC) generate
+
+migrate-up: env-check ## Apply pending migrations to the dev database
+	$(WITH_ENV) cd backend && DATABASE_URL="$(HOST_DB_URL)/$${POSTGRES_DB}?sslmode=disable" go run ./cmd/migrate up
+
+migrate-down: env-check ## Roll back the last migration on the dev database
+	$(WITH_ENV) cd backend && DATABASE_URL="$(HOST_DB_URL)/$${POSTGRES_DB}?sslmode=disable" go run ./cmd/migrate down
+
+migrate-version: env-check ## Show the dev database's migration version
+	$(WITH_ENV) cd backend && DATABASE_URL="$(HOST_DB_URL)/$${POSTGRES_DB}?sslmode=disable" go run ./cmd/migrate version
 
 # Created once from the example; never overwritten, so local edits survive.
 .env:
