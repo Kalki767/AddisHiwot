@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -56,8 +57,10 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, fmt.Errorf("APP_ENV must be %q or %q, got %q", EnvDevelopment, EnvProduction, cfg.Env))
 	}
 	if cfg.HTTPAddr != "" {
-		if _, _, err := net.SplitHostPort(cfg.HTTPAddr); err != nil {
-			errs = append(errs, fmt.Errorf("HTTP_ADDR must look like host:port or :port, got %q", cfg.HTTPAddr))
+		// The port must be a number: the container health check reads it the same way.
+		_, port, err := net.SplitHostPort(cfg.HTTPAddr)
+		if n, convErr := strconv.Atoi(port); err != nil || convErr != nil || n < 1 || n > 65535 {
+			errs = append(errs, fmt.Errorf("HTTP_ADDR must look like host:port or :port with a port from 1 to 65535, got %q", cfg.HTTPAddr))
 		}
 	}
 	if cfg.DatabaseURL != "" {

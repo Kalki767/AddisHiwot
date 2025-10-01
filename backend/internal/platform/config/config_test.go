@@ -48,6 +48,16 @@ func TestLoadOptionalValues(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsHostForms(t *testing.T) {
+	for _, addr := range []string{":8080", "127.0.0.1:8080", "[::1]:8080", "0.0.0.0:1"} {
+		m := valid()
+		m["HTTP_ADDR"] = addr
+		if _, err := Load(env(m)); err != nil {
+			t.Errorf("HTTP_ADDR=%q rejected: %v", addr, err)
+		}
+	}
+}
+
 func TestLoadReportsEveryMissingValueAtOnce(t *testing.T) {
 	_, err := Load(env(map[string]string{}))
 	if err == nil {
@@ -66,6 +76,9 @@ func TestLoadRejectsBadValues(t *testing.T) {
 	}{
 		{"APP_ENV", "staging", "APP_ENV must be"},
 		{"HTTP_ADDR", "8080", "HTTP_ADDR must look like"},
+		{"HTTP_ADDR", ":http", "HTTP_ADDR must look like"},
+		{"HTTP_ADDR", ":0", "HTTP_ADDR must look like"},
+		{"HTTP_ADDR", ":65536", "HTTP_ADDR must look like"},
 		{"DATABASE_URL", "mysql://u:p@h/db", "DATABASE_URL must be a postgres:// URL"},
 		{"LOG_LEVEL", "loud", "LOG_LEVEL must be"},
 		{"SHUTDOWN_TIMEOUT", "soon", "SHUTDOWN_TIMEOUT must be a duration"},
