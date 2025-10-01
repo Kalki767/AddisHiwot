@@ -53,6 +53,22 @@ make down     # stop, keep data
 make down-v   # stop and delete all local data
 ```
 
+## Database
+
+The schema lives in numbered SQL migrations in `backend/migrations/` (golang-migrate format, never edited once
+committed). `make up` applies pending migrations before the API starts. Queries live in `backend/queries/`;
+sqlc turns them into typed Go in `backend/internal/db/`, and `make lint` fails if that code is out of date.
+
+```bash
+make migrate-version   # current migration
+make migrate-down      # roll back the last migration
+make migrate-up        # apply pending migrations
+make generate          # regenerate internal/db after changing queries/ or migrations/
+```
+
+`make test` starts PostgreSQL and gives every database test its own fresh copy of a migrated template
+database, dropped when the test ends.
+
 ## Commit messages
 
 Every commit follows the Angular format:
