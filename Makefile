@@ -11,6 +11,9 @@ GOLANGCI := docker run --rm -v $(CURDIR)/backend:/app -w /app \
 # sqlc runs as the current user so generated files are not owned by root.
 SQLC := docker run --rm --user $$(id -u):$$(id -g) -v $(CURDIR)/backend:/src -w /src \
 	sqlc/sqlc:1.31.1@sha256:70f53171d27b2424e9358869975455a6e955a5aa8e58a998a270a6e34e525537
+# Redocly CLI validates the OpenAPI spec (settings in backend/api/redocly.yaml).
+REDOCLY := docker run --rm --user $$(id -u):$$(id -g) -v $(CURDIR)/backend/api:/spec -w /spec \
+	redocly/cli:2.70.0@sha256:f09828706881234790394d0f4032b2956c902f093e80ef08ab6ba3234c1aca7a
 # Loads .env and sets DB_HOST, the address to reach the published postgres port from this machine.
 WITH_ENV := set -a && . ./.env && set +a && DB_HOST=$${BIND_ADDRESS:-127.0.0.1} && \
 	if [ "$$DB_HOST" = 0.0.0.0 ]; then DB_HOST=127.0.0.1; fi &&
@@ -27,11 +30,12 @@ test: env-check ## Run every test (Go, race detector, database tests against the
 	$(WITH_ENV) cd backend && TEST_REQUIRE_DB=1 TEST_DATABASE_URL="$(HOST_DB_URL)/postgres?sslmode=disable" \
 		go test -race -count=1 ./...
 
-lint: ## Run go vet, golangci-lint and check docker-compose.yml
+lint: ## Run go vet, golangci-lint, sqlc diff, the OpenAPI check and the compose check
 	cd backend && go vet ./...
 	$(GOLANGCI) golangci-lint run ./...
 	$(SQLC) diff
 	@echo "internal/db: matches queries/ and migrations/"
+	$(REDOCLY) lint --format=summary openapi.yaml
 	$(COMPOSE) --env-file .env.example config --quiet
 	@echo "docker-compose.yml: valid"
 
