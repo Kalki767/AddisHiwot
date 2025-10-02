@@ -3,8 +3,9 @@
 //
 //	http → usecase → domain ← postgres
 //
-// domain may use only the standard library and the uuid type; usecase may not
-// touch the database or HTTP; postgres may not reach up into usecase or http.
+// domain may use only the standard library, uuid and the pure page and validate
+// packages; usecase may not touch the database or HTTP; postgres may not reach
+// up into usecase or http.
 package archtest
 
 import (
@@ -19,7 +20,9 @@ const module = "github.com/Kalki767/AddisHiwot/backend"
 // layerRules lists, per layer, import paths (or prefixes) that the layer must not use.
 var layerRules = map[string][]string{
 	"domain": {
-		"github.com/jackc/", module + "/internal/db", module + "/internal/platform",
+		"github.com/jackc/", module + "/internal/db", module + "/internal/platform/httpx",
+		module + "/internal/platform/database", module + "/internal/platform/config",
+		module + "/internal/platform/health", module + "/internal/platform/testdb",
 		"net/http", "database/sql", "/postgres", "/http", "/usecase",
 	},
 	"usecase": {
@@ -28,8 +31,13 @@ var layerRules = map[string][]string{
 	"postgres": {"/usecase", "/http", "net/http"},
 }
 
-// allowedOutsideStdlib are the only non-standard imports a domain package may use.
-var allowedOutsideStdlib = []string{"github.com/google/uuid"}
+// allowedOutsideStdlib are the only non-standard imports a domain package may
+// use: the uuid type and our two pure packages (no I/O, no HTTP, no database).
+var allowedOutsideStdlib = []string{
+	"github.com/google/uuid",
+	module + "/internal/platform/page",
+	module + "/internal/platform/validate",
+}
 
 func TestDependencyRule(t *testing.T) {
 	checked := 0
