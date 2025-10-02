@@ -69,6 +69,16 @@ make generate          # regenerate internal/db after changing queries/ or migra
 `make test` starts PostgreSQL and gives every database test its own fresh copy of a migrated template
 database, dropped when the test ends.
 
+## API conventions
+
+The contract is in [`backend/api/openapi.yaml`](backend/api/openapi.yaml) (OpenAPI 3.1, checked by `make lint`).
+
+- Request bodies: `application/json`, one object, at most 64 KB, no unknown fields.
+- Every error has one shape, and clients act on `code`:
+  `{"error": {"code": "VALIDATION_FAILED", "message": "...", "request_id": "...", "fields": [...]}}`.
+- Every response carries `X-Request-ID`; the same ID is in the error body and in the server log.
+- Lists: `?limit=` (1–100, default 20) and `?cursor=` from the previous `next_cursor` (`null` on the last page).
+
 ## Commit messages
 
 Every commit follows the Angular format:
