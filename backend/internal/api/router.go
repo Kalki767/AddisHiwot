@@ -16,7 +16,8 @@ type Deps struct {
 	Health *health.Checker
 }
 
-// NewRouter returns the API handler. Every request gets a request ID. The
+// NewRouter returns the API handler. Every request gets a request ID, every
+// error uses the JSON envelope, and a panic becomes a logged 500. The
 // health endpoints skip the access log: Docker calls /readyz every few seconds,
 // and logging each call would bury the real traffic (a failing check still
 // logs its own warning). Everything else is access-logged.
@@ -29,8 +30,9 @@ func NewRouter(d Deps) http.Handler {
 	// Without these, other methods would fall through to "/" and get 404 instead of 405.
 	root.HandleFunc("/healthz", onlyGet)
 	root.HandleFunc("/readyz", onlyGet)
-	root.Handle("/", httpx.AccessLog(d.Logger, app))
-	return httpx.RequestID(root)
+	root.Handle("/", httpx.AccessLog(d.Logger, httpx.Recover(d.Logger, app)))
+	// MuxErrors turns the mux's plain-text 404 and 405 into the JSON error envelope.
+	return httpx.RequestID(httpx.MuxErrors(root))
 }
 
 func onlyGet(w http.ResponseWriter, _ *http.Request) {

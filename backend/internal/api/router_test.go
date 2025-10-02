@@ -46,6 +46,10 @@ func TestRoutes(t *testing.T) {
 			if rec.Header().Get(httpx.RequestIDHeader) == "" {
 				t.Error("response has no request ID, even on errors")
 			}
+			if tt.want >= 400 && (rec.Header().Get("Content-Type") != "application/json" ||
+				!strings.Contains(rec.Body.String(), `"request_id"`)) {
+				t.Errorf("error response is not the JSON envelope: %q", rec.Body.String())
+			}
 		})
 	}
 }
