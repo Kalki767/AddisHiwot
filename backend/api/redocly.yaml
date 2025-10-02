@@ -1,0 +1,9 @@
+# Redocly CLI settings for `make lint` (validates openapi.yaml).
+extends:
+  - recommended
+rules:
+  # The shared error responses and pagination parameters are building blocks
+  # for the endpoints added from Day 8 on; they are unused until then.
+  no-unused-components: off
+  # The repository has no licence yet; add info.license once one is chosen.
+  info-license: off

@@ -1,0 +1,180 @@
+openapi: 3.1.0
+info:
+  title: Addis Hiwot API
+  version: 0.1.0
+  summary: Backend of Addis Hiwot, a recovery and mental-health companion app.
+  description: |
+    Conventions every endpoint follows:
+
+    - **JSON only.** Request bodies must be `Content-Type: application/json`, at most 64 KB, one JSON
+      object, with no fields the endpoint does not define.
+    - **Errors** always use the same envelope (`ErrorEnvelope`). Clients act on `error.code`, never on
+      `error.message`; quote `error.request_id` when reporting a problem.
+    - **Request IDs.** Every response has an `X-Request-ID` header. A client may send its own (letters,
+      digits, `.`, `_`, `-`, up to 64 characters); other values are replaced.
+    - **Lists** use cursor pagination: `?limit=` (1–100, default 20) and `?cursor=` taken from the previous
+      response's `next_cursor`, which is `null` on the last page.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development (make up)
+tags:
+  - name: health
+    description: Liveness and readiness for Docker and load balancers.
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getLiveness
+      summary: Is the process alive?
+      description: Answers 200 while the process can answer at all. It does not check the database.
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Liveness" }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+  /readyz:
+    get:
+      tags: [health]
+      operationId: getReadiness
+      summary: Can the instance serve requests?
+      description: 200 when the database answers within 2 seconds and the instance is not shutting down.
+      security: []
+      responses:
+        "200":
+          description: Ready.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+              example: { status: ok, database: up }
+        "405": { $ref: "#/components/responses/MethodNotAllowed" }
+        "503":
+          description: Not ready; send no traffic. `status` is `unavailable` or `shutting_down`.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/RequestID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+              example: { status: unavailable, database: down }
+
+components:
+  headers:
+    RequestID:
+      description: The request's ID; also in every log line and error body for this request.
+      schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" }
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Page size.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor from the previous page's `next_cursor`. Leave out for the first page.
+      schema: { type: string }
+
+  schemas:
+    Liveness:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, const: ok }
+    Readiness:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, unavailable, shutting_down] }
+        database: { type: string, enum: [up, down] }
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable code.
+              enum: [BAD_JSON, EMPTY_BODY, UNKNOWN_FIELD, BODY_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE,
+                     VALIDATION_FAILED, BAD_CURSOR, NOT_FOUND, METHOD_NOT_ALLOWED, INTERNAL]
+            message:
+              type: string
+              description: English explanation for developers and logs; not shown to users as is.
+            request_id: { type: string }
+            fields:
+              type: array
+              description: Present only with VALIDATION_FAILED, one entry per invalid field, sorted by field.
+              items: { $ref: "#/components/schemas/FieldError" }
+    FieldError:
+      type: object
+      required: [field, code, message]
+      properties:
+        field: { type: string, examples: [email] }
+        code: { type: string, description: Machine code the app translates, examples: [invalid_email] }
+        message: { type: string, examples: [must be an email address] }
+    PageInfo:
+      description: Every list response has `items` plus this field.
+      type: object
+      required: [next_cursor]
+      properties:
+        next_cursor:
+          type: [string, "null"]
+          description: Pass as `?cursor=` to get the next page; `null` on the last page.
+
+  responses:
+    BadRequest:
+      description: Malformed body (BAD_JSON, EMPTY_BODY, UNKNOWN_FIELD) or bad cursor (BAD_CURSOR).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ValidationFailed:
+      description: One or more fields are invalid (VALIDATION_FAILED, with `fields`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: VALIDATION_FAILED
+              message: Some fields are not valid.
+              request_id: 0f3c2a9b6d8e4f1a9c7b5e3d2a1f0e9d
+              fields:
+                - { field: email, code: invalid_email, message: must be an email address }
+    PayloadTooLarge:
+      description: The body is over 64 KB (BODY_TOO_LARGE).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    UnsupportedMediaType:
+      description: The body is not application/json (UNSUPPORTED_MEDIA_TYPE).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: No such endpoint or resource (NOT_FOUND).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    MethodNotAllowed:
+      description: The endpoint exists but not for this method (METHOD_NOT_ALLOWED); see the Allow header.
+      headers:
+        Allow:
+          description: Methods this endpoint supports.
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Internal:
+      description: Unexpected server error (INTERNAL); details are only in the server log.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
