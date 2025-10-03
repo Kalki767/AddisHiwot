@@ -32,7 +32,9 @@ type User struct {
 	DisplayName      string
 	Locale           string
 	Timezone         string
-	IsAdultConfirmed bool
+	AdultConfirmedAt *time.Time // when the person confirmed being 18 or older
+	TermsAcceptedAt  *time.Time // when they accepted TermsVersion
+	TermsVersion     *string
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -45,7 +47,9 @@ type NewUser struct {
 	DisplayName      string
 	Locale           string
 	Timezone         string
-	IsAdultConfirmed bool
+	AdultConfirmedAt *time.Time
+	TermsAcceptedAt  *time.Time
+	TermsVersion     *string
 }
 
 // Repository stores and finds accounts. Emails and usernames match in any

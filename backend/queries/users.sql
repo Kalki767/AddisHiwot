@@ -1,6 +1,8 @@
 -- name: CreateUser :one
-INSERT INTO users (email, username, password_hash, display_name, locale, timezone, is_adult_confirmed)
-VALUES (@email, @username, @password_hash, @display_name, @locale, @timezone, @is_adult_confirmed)
+INSERT INTO users (email, username, password_hash, display_name, locale, timezone,
+                   adult_confirmed_at, terms_accepted_at, terms_version)
+VALUES (@email, @username, @password_hash, @display_name, @locale, @timezone,
+        @adult_confirmed_at, @terms_accepted_at, @terms_version)
 RETURNING *;
 
 -- name: GetUserByID :one

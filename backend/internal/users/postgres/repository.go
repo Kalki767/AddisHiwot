@@ -37,7 +37,9 @@ func (r *Repository) Create(ctx context.Context, u domain.NewUser) (domain.User,
 		DisplayName:      u.DisplayName,
 		Locale:           u.Locale,
 		Timezone:         u.Timezone,
-		IsAdultConfirmed: u.IsAdultConfirmed,
+		AdultConfirmedAt: u.AdultConfirmedAt,
+		TermsAcceptedAt:  u.TermsAcceptedAt,
+		TermsVersion:     u.TermsVersion,
 	})
 	if err != nil {
 		return domain.User{}, mapError(err)
@@ -107,7 +109,9 @@ func toDomain(r db.User) domain.User {
 		DisplayName:      r.DisplayName,
 		Locale:           r.Locale,
 		Timezone:         r.Timezone,
-		IsAdultConfirmed: r.IsAdultConfirmed,
+		AdultConfirmedAt: r.AdultConfirmedAt,
+		TermsAcceptedAt:  r.TermsAcceptedAt,
+		TermsVersion:     r.TermsVersion,
 		CreatedAt:        r.CreatedAt,
 		UpdatedAt:        r.UpdatedAt,
 	}

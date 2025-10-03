@@ -16,6 +16,8 @@ import (
 
 func ptr(s string) *string { return &s }
 
+var consentTime = time.Date(2026, 10, 26, 9, 15, 0, 0, time.UTC)
+
 func newUser(email, username string) domain.NewUser {
 	return domain.NewUser{
 		Email:            email,
@@ -24,7 +26,9 @@ func newUser(email, username string) domain.NewUser {
 		DisplayName:      "Kidist",
 		Locale:           "am",
 		Timezone:         "Africa/Addis_Ababa",
-		IsAdultConfirmed: true,
+		AdultConfirmedAt: &consentTime,
+		TermsAcceptedAt:  &consentTime,
+		TermsVersion:     ptr("2026-10"),
 	}
 }
 
@@ -52,7 +56,8 @@ func TestCreateAndReadBack(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if got.ID != created.ID || got.Locale != "am" || !got.IsAdultConfirmed || *got.PasswordHash != "$argon2id$fake" {
+		if got.ID != created.ID || got.Locale != "am" || *got.PasswordHash != "$argon2id$fake" ||
+			got.AdultConfirmedAt == nil || !got.AdultConfirmedAt.Equal(consentTime) || *got.TermsVersion != "2026-10" {
 			t.Errorf("%s: got %+v", name, got)
 		}
 	}
@@ -120,14 +125,15 @@ func TestGoogleOnlyAccountHasNoPassword(t *testing.T) {
 func TestDatabaseRulesRejectBadValues(t *testing.T) {
 	repo := postgres.NewRepository(testdb.New(t))
 	tests := map[string]func(*domain.NewUser){
-		"username too short":      func(u *domain.NewUser) { u.Username = "ab" },
-		"username starts digit":   func(u *domain.NewUser) { u.Username = "1kidist" },
-		"username with @":         func(u *domain.NewUser) { u.Username = "kid@ist" },
-		"username too long":       func(u *domain.NewUser) { u.Username = "a23456789012345678901" },
-		"email without @":         func(u *domain.NewUser) { u.Email = "kidist.example.com" },
-		"empty display name":      func(u *domain.NewUser) { u.DisplayName = "" },
-		"unsupported locale":      func(u *domain.NewUser) { u.Locale = "fr" },
-		"display name 51 letters": func(u *domain.NewUser) { u.DisplayName = strings.Repeat("ሀ", 51) },
+		"username too short":         func(u *domain.NewUser) { u.Username = "ab" },
+		"username starts digit":      func(u *domain.NewUser) { u.Username = "1kidist" },
+		"username with @":            func(u *domain.NewUser) { u.Username = "kid@ist" },
+		"username too long":          func(u *domain.NewUser) { u.Username = "a23456789012345678901" },
+		"email without @":            func(u *domain.NewUser) { u.Email = "kidist.example.com" },
+		"empty display name":         func(u *domain.NewUser) { u.DisplayName = "" },
+		"unsupported locale":         func(u *domain.NewUser) { u.Locale = "fr" },
+		"terms time without version": func(u *domain.NewUser) { u.TermsVersion = nil },
+		"display name 51 letters":    func(u *domain.NewUser) { u.DisplayName = strings.Repeat("ሀ", 51) },
 	}
 	for name, change := range tests {
 		t.Run(name, func(t *testing.T) {

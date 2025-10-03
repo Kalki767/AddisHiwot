@@ -18,7 +18,9 @@ type User struct {
 	DisplayName      string
 	Locale           string
 	Timezone         string
-	IsAdultConfirmed bool
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+	AdultConfirmedAt *time.Time
+	TermsAcceptedAt  *time.Time
+	TermsVersion     *string
 }
