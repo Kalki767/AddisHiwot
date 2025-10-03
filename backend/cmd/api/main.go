@@ -19,10 +19,14 @@ import (
 	"time"
 
 	"github.com/Kalki767/AddisHiwot/backend/internal/api"
+	"github.com/Kalki767/AddisHiwot/backend/internal/auth/argon2id"
+	authhttp "github.com/Kalki767/AddisHiwot/backend/internal/auth/http"
+	authusecase "github.com/Kalki767/AddisHiwot/backend/internal/auth/usecase"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/config"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/database"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/health"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/httpx"
+	userspostgres "github.com/Kalki767/AddisHiwot/backend/internal/users/postgres"
 )
 
 func main() {
@@ -55,8 +59,17 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
+	authService, err := authusecase.NewService(userspostgres.NewRepository(pool), argon2id.New(argon2id.OWASPMinimum), time.Now)
+	if err != nil {
+		return err
+	}
+
 	checker := health.New(pool, 2*time.Second, logger)
-	srv := httpx.NewServer(api.NewRouter(api.Deps{Logger: logger, Health: checker}))
+	srv := httpx.NewServer(api.NewRouter(api.Deps{
+		Logger:   logger,
+		Health:   checker,
+		Features: []api.Registrar{authhttp.New(authService, logger)},
+	}))
 	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
 
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.HTTPAddr)

@@ -10,10 +10,16 @@ import (
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/httpx"
 )
 
+// Registrar adds a feature's routes, such as (*authhttp.Handler).Register.
+type Registrar interface {
+	Register(mux *http.ServeMux)
+}
+
 // Deps are the parts the routes need.
 type Deps struct {
-	Logger *slog.Logger
-	Health *health.Checker
+	Logger   *slog.Logger
+	Health   *health.Checker
+	Features []Registrar // each feature's HTTP handlers
 }
 
 // NewRouter returns the API handler. Every request gets a request ID, every
@@ -22,7 +28,10 @@ type Deps struct {
 // and logging each call would bury the real traffic (a failing check still
 // logs its own warning). Everything else is access-logged.
 func NewRouter(d Deps) http.Handler {
-	app := http.NewServeMux() // feature routes are added here from Day 8 on
+	app := http.NewServeMux()
+	for _, f := range d.Features {
+		f.Register(app)
+	}
 
 	root := http.NewServeMux()
 	root.HandleFunc("GET /healthz", d.Health.Live)
