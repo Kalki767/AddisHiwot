@@ -4,8 +4,8 @@
 //	http → usecase → domain ← postgres
 //
 // domain may use only the standard library, uuid and the pure page and validate
-// packages; usecase may not touch the database or HTTP; postgres may not reach
-// up into usecase or http.
+// packages; usecase may reach our other packages only through their domain;
+// postgres may not reach up into usecase or http; http may not touch the database.
 package archtest
 
 import (
@@ -29,6 +29,7 @@ var layerRules = map[string][]string{
 		"github.com/jackc/", module + "/internal/db", "net/http", "database/sql", "/postgres", "/http",
 	},
 	"postgres": {"/usecase", "/http", "net/http"},
+	"http":     {"github.com/jackc/", module + "/internal/db", "/postgres", "database/sql"},
 }
 
 // allowedOutsideStdlib are the only non-standard imports a domain package may
@@ -60,6 +61,10 @@ func TestDependencyRule(t *testing.T) {
 				}
 				if layer == "domain" && strings.Contains(strings.SplitN(imp, "/", 2)[0], ".") && !allowed(imp) {
 					t.Errorf("%s (domain layer) imports %s; domain may use only the standard library and %v", dir, imp, allowedOutsideStdlib)
+				}
+				// A use case may reach other packages of ours only through their domain.
+				if layer == "usecase" && strings.HasPrefix(imp, module+"/internal/") && !strings.HasSuffix(imp, "/domain") && !allowed(imp) {
+					t.Errorf("%s (usecase layer) imports %s; use cases may use only domain packages and %v", dir, imp, allowedOutsideStdlib[1:])
 				}
 			}
 		}
