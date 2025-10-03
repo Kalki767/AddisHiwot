@@ -31,6 +31,14 @@ func TestDecodeJSONAcceptsAValidObject(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONAcceptsAnEmptyObjectAndSurroundingSpace(t *testing.T) {
+	for _, body := range []string{`{}`, " \n\t{\"age\":1}\n "} {
+		if _, err := decode("application/json", body); err != nil {
+			t.Errorf("%q: %v", body, err)
+		}
+	}
+}
+
 func TestDecodeJSONErrorPaths(t *testing.T) {
 	tests := []struct {
 		name, contentType, body string
@@ -41,6 +49,9 @@ func TestDecodeJSONErrorPaths(t *testing.T) {
 		{"body ends early", "application/json", `{"email": "k@`, 400, CodeBadJSON, "ends too early"},
 		{"wrong type", "application/json", `{"age": "thirty"}`, 400, CodeBadJSON, `"age" must be a int`},
 		{"not an object", "application/json", `["a"]`, 400, CodeBadJSON, "JSON object"},
+		{"null", "application/json", `null`, 400, CodeBadJSON, "JSON object"},
+		{"null after spaces", "application/json", " \n null", 400, CodeBadJSON, "JSON object"},
+		{"a bare string", "application/json", `"text"`, 400, CodeBadJSON, "JSON object"},
 		{"two objects", "application/json", `{"age":1}{"age":2}`, 400, CodeBadJSON, "single JSON object"},
 		{"unknown field", "application/json", `{"email":"k@example.com","is_admin":true}`, 400, CodeUnknownField, `"is_admin"`},
 		{"empty body", "application/json", ``, 400, CodeEmptyBody, "empty"},

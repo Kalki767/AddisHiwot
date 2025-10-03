@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +24,13 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 		return NewError(http.StatusUnsupportedMediaType, CodeUnsupportedMediaType, "Send the body as application/json.")
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, MaxBodyBytes)
-	dec := json.NewDecoder(r.Body)
+	body := bufio.NewReader(http.MaxBytesReader(w, r.Body, MaxBodyBytes))
+	// json.Decode accepts a bare `null` and leaves dst untouched, which would
+	// make `null` look like `{}`; only an object may start the body.
+	if first, err := firstNonSpace(body); err == nil && first != '{' {
+		return NewError(http.StatusBadRequest, CodeBadJSON, "The body must be a JSON object.")
+	}
+	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(dst); err != nil {
@@ -62,6 +68,19 @@ func decodeError(err error) error {
 		return NewError(http.StatusBadRequest, CodeUnknownField, "Unknown field "+field+".")
 	default:
 		return NewError(http.StatusBadRequest, CodeBadJSON, "Malformed JSON.")
+	}
+}
+
+// firstNonSpace returns the first byte after JSON white space without consuming it.
+func firstNonSpace(r *bufio.Reader) (byte, error) {
+	for {
+		b, err := r.ReadByte()
+		if err != nil {
+			return 0, err
+		}
+		if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+			return b, r.UnreadByte()
+		}
 	}
 }
 
