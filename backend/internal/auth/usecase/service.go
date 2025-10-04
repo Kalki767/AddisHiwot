@@ -78,6 +78,7 @@ func (s *Service) Signup(ctx context.Context, in SignupInput) (SignupOutcome, er
 	var v validate.Validator
 	v.Check(usernamePattern.MatchString(in.Username), "username", "invalid_username",
 		"must be 3 to 20 letters, digits, '_' or '.', starting with a letter")
+	v.Check(!authdomain.IsReservedUsername(in.Username), "username", "username_reserved", "is reserved for the Addis Hiwot team")
 	v.Check(validate.Email(in.Email), "email", "invalid_email", "must be an email address")
 	authdomain.CheckPassword(&v, in.Password, in.Username, in.Email)
 	v.Check(in.IsAdult, "is_adult", "must_be_adult", "Addis Hiwot is for people aged 18 or older")

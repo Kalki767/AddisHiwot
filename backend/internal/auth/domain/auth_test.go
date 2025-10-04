@@ -45,3 +45,16 @@ func TestCheckPasswordIgnoresShortEmailNames(t *testing.T) {
 		t.Errorf("got %q, want no problem", got)
 	}
 }
+
+func TestIsReservedUsername(t *testing.T) {
+	for _, name := range []string{"admin", "AddisBot", "SUPPORT", " moderator ", "addis_hiwot"} {
+		if !IsReservedUsername(name) {
+			t.Errorf("%q is not reserved, want reserved", name)
+		}
+	}
+	for _, name := range []string{"kidist", "admins", "supporter", "addisbot2"} {
+		if IsReservedUsername(name) {
+			t.Errorf("%q is reserved, want free", name)
+		}
+	}
+}

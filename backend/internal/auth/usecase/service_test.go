@@ -169,6 +169,7 @@ func TestSignupValidation(t *testing.T) {
 		"invalid email":           {func(in *SignupInput) { in.Email = "kidist@localhost" }, "email", "invalid_email"},
 		"username with @":         {func(in *SignupInput) { in.Username = "kid@ist" }, "username", "invalid_username"},
 		"username starting digit": {func(in *SignupInput) { in.Username = "2kidist" }, "username", "invalid_username"},
+		"reserved username":       {func(in *SignupInput) { in.Username = "AddisBot" }, "username", "username_reserved"},
 		"unsupported locale":      {func(in *SignupInput) { in.Locale = "fr" }, "locale", "unsupported_locale"},
 	}
 	for name, tt := range tests {

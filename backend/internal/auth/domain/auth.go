@@ -52,8 +52,24 @@ func CheckPassword(v *validate.Validator, password, username, email string) {
 	}
 }
 
+// IsReservedUsername reports whether a username belongs to the app or its team
+// (in any letter case), so nobody can pose as staff or as AddisBot.
+func IsReservedUsername(username string) bool {
+	return reservedUsernames[strings.ToLower(strings.TrimSpace(username))]
+}
+
+// reservedUsernames are names of the app, its bot and its team, plus the
+// obvious variants people would use to pose as them.
+var reservedUsernames = map[string]bool{
+	"admin": true, "administrator": true, "addisbot": true, "addis.bot": true, "addis_bot": true,
+	"addishiwot": true, "addis.hiwot": true, "addis_hiwot": true, "support": true, "help": true,
+	"moderator": true, "mod": true, "staff": true, "team": true, "official": true, "system": true,
+	"root": true, "security": true, "privacy": true, "counselor": true, "counsellor": true,
+}
+
 // commonPasswords is a short starter list of very common passwords of 8 or more
-// characters, plus the app's own name. A full breached-password check is in notes/DEBT.md.
+// characters, plus the app's own name. A check against a full list of breached
+// passwords is planned before the beta.
 var commonPasswords = map[string]bool{
 	"password": true, "password1": true, "password123": true, "passw0rd": true,
 	"12345678": true, "123456789": true, "1234567890": true, "87654321": true,
