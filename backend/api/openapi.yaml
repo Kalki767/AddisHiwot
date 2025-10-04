@@ -21,7 +21,13 @@ tags:
   - name: health
     description: Liveness and readiness for Docker and load balancers.
   - name: auth
-    description: Sign-up and login. Passwords are hashed with Argon2id (m=19 MiB, t=2, p=1).
+    description: |
+      Sign-up, login and sessions. Passwords are hashed with Argon2id (m=19 MiB, t=2, p=1).
+      Login returns a short-lived access token (JWT, 15 minutes) and a refresh token (30 days). Each refresh
+      returns a new pair and the old refresh token stops working; presenting an old one again ends the whole
+      session (someone copied it), so the user must log in again.
+  - name: users
+    description: The logged-in user's account.
 
 paths:
   /healthz:
@@ -101,7 +107,7 @@ paths:
       description: |
         An `identifier` containing `@` is an email, anything else a username (usernames never contain `@`).
         A missing account, a Google-only account and a wrong password all give the same 401
-        `INVALID_CREDENTIALS` after the same hashing work. Tokens are added on Day 9.
+        `INVALID_CREDENTIALS` after the same hashing work. Starts a session and returns its tokens.
       security: []
       requestBody:
         required: true
@@ -110,14 +116,15 @@ paths:
             schema: { $ref: "#/components/schemas/LoginRequest" }
       responses:
         "200":
-          description: Logged in.
+          description: "Logged in. Sent with `Cache-Control: no-store`."
           content:
             application/json:
               schema:
                 type: object
-                required: [user]
+                required: [user, tokens]
                 properties:
                   user: { $ref: "#/components/schemas/User" }
+                  tokens: { $ref: "#/components/schemas/Tokens" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401":
           description: Wrong email, username or password (INVALID_CREDENTIALS).
@@ -129,7 +136,85 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  /v1/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshTokens
+      summary: Exchange a refresh token for a new access and refresh token.
+      description: |
+        The refresh token sent can never be used again. If an already-used refresh token is sent, the whole
+        session is ended and every token of it stops working. Any failure answers 401 INVALID_REFRESH_TOKEN:
+        the app should send the user to the login screen.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: "New tokens. Sent with `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens]
+                properties:
+                  tokens: { $ref: "#/components/schemas/Tokens" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Unknown, expired, reused or ended refresh token (INVALID_REFRESH_TOKEN).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: End the session of a refresh token.
+      description: Always 204, also for an unknown or already ended session, so it can be retried safely.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "204": { description: The session is ended. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/me:
+    get:
+      tags: [users]
+      operationId: getMe
+      summary: The logged-in user's account.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: "The account. Sent with `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/Internal" }
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "The access token from login or refresh, in `Authorization: Bearer <token>`."
+
   headers:
     RequestID:
       description: The request's ID; also in every log line and error body for this request.
@@ -172,7 +257,7 @@ components:
               description: Stable machine-readable code.
               enum: [BAD_JSON, EMPTY_BODY, UNKNOWN_FIELD, BODY_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE,
                      VALIDATION_FAILED, BAD_CURSOR, NOT_FOUND, METHOD_NOT_ALLOWED, INTERNAL,
-                     INVALID_CREDENTIALS]
+                     INVALID_CREDENTIALS, INVALID_REFRESH_TOKEN, UNAUTHENTICATED, TOKEN_EXPIRED, INVALID_TOKEN]
             message:
               type: string
               description: English explanation for developers and logs; not shown to users as is.
@@ -233,6 +318,21 @@ components:
         locale: { type: string, enum: [en, am] }
         timezone: { type: string, examples: [Africa/Addis_Ababa] }
         created_at: { type: string, format: date-time }
+    Tokens:
+      type: object
+      required: [token_type, access_token, access_token_expires_at, refresh_token, refresh_token_expires_at]
+      properties:
+        token_type: { type: string, const: Bearer }
+        access_token: { type: string, description: "JWT; send as `Authorization: Bearer <token>`." }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string, description: Opaque; store securely on the device. }
+        refresh_token_expires_at: { type: string, format: date-time }
+    RefreshRequest:
+      type: object
+      additionalProperties: false
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
     PageInfo:
       description: Every list response has `items` plus this field.
       type: object
@@ -243,6 +343,16 @@ components:
           description: Pass as `?cursor=` to get the next page; `null` on the last page.
 
   responses:
+    Unauthorized:
+      description: |
+        No valid access token. `UNAUTHENTICATED`: none was sent. `TOKEN_EXPIRED`: refresh, then retry.
+        `INVALID_TOKEN`: malformed or not issued by us; log in again. Has a `WWW-Authenticate: Bearer` header.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
     BadRequest:
       description: Malformed body (BAD_JSON, EMPTY_BODY, UNKNOWN_FIELD) or bad cursor (BAD_CURSOR).
       content:
