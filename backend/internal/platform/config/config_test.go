@@ -16,6 +16,7 @@ func valid() map[string]string {
 		"APP_ENV":      "development",
 		"HTTP_ADDR":    ":8080",
 		"DATABASE_URL": "postgres://u:secret-pw@localhost:5433/db?sslmode=disable",
+		"JWT_SECRET":   "a-dev-secret-that-is-at-least-32-bytes",
 	}
 }
 
@@ -32,6 +33,12 @@ func TestLoadValidWithDefaults(t *testing.T) {
 	}
 	if cfg.ShutdownTimeout != 15*time.Second {
 		t.Errorf("ShutdownTimeout default = %v, want 15s", cfg.ShutdownTimeout)
+	}
+	if cfg.AccessTokenTTL != 15*time.Minute || cfg.RefreshTokenTTL != 30*24*time.Hour {
+		t.Errorf("token TTL defaults = %v, %v", cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	}
+	if string(cfg.JWTSecret) != "a-dev-secret-that-is-at-least-32-bytes" {
+		t.Error("JWT_SECRET not read")
 	}
 }
 
@@ -63,7 +70,7 @@ func TestLoadReportsEveryMissingValueAtOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load with an empty environment succeeded")
 	}
-	for _, key := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL"} {
+	for _, key := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "JWT_SECRET"} {
 		if !strings.Contains(err.Error(), key+" is required") {
 			t.Errorf("error does not mention %s:\n%v", key, err)
 		}
@@ -83,6 +90,10 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		{"LOG_LEVEL", "loud", "LOG_LEVEL must be"},
 		{"SHUTDOWN_TIMEOUT", "soon", "SHUTDOWN_TIMEOUT must be a duration"},
 		{"SHUTDOWN_TIMEOUT", "-1s", "SHUTDOWN_TIMEOUT must be positive"},
+		{"JWT_SECRET", "too-short", "JWT_SECRET must have at least 32 bytes, got 9"},
+		{"ACCESS_TOKEN_TTL", "soon", "ACCESS_TOKEN_TTL must be a duration"},
+		{"REFRESH_TOKEN_TTL", "0s", "REFRESH_TOKEN_TTL must be positive"},
+		{"REFRESH_TOKEN_TTL", "10m", "REFRESH_TOKEN_TTL must be longer than ACCESS_TOKEN_TTL"},
 		{"APP_ENV", "   ", "APP_ENV is required"},
 	}
 	for _, tt := range tests {
@@ -94,6 +105,15 @@ func TestLoadRejectsBadValues(t *testing.T) {
 				t.Errorf("err = %v, want it to contain %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadNeverPrintsTheJWTSecret(t *testing.T) {
+	m := valid()
+	m["JWT_SECRET"] = "short-secret"
+	_, err := Load(env(m))
+	if err == nil || strings.Contains(err.Error(), "short-secret") {
+		t.Errorf("err = %v, want an error without the secret", err)
 	}
 }
 

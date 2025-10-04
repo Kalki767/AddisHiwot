@@ -28,7 +28,13 @@ type Config struct {
 	DatabaseURL     string        // DATABASE_URL: postgres://user:pass@host:port/db
 	LogLevel        slog.Level    // LOG_LEVEL: debug, info, warn or error (default info)
 	ShutdownTimeout time.Duration // SHUTDOWN_TIMEOUT: time allowed to finish requests on stop (default 15s)
+	JWTSecret       []byte        // JWT_SECRET: signs access tokens; at least 32 bytes
+	AccessTokenTTL  time.Duration // ACCESS_TOKEN_TTL: access token lifetime (default 15m)
+	RefreshTokenTTL time.Duration // REFRESH_TOKEN_TTL: refresh token lifetime (default 720h = 30 days)
 }
+
+// MinJWTSecretBytes is the shortest accepted JWT_SECRET (256 bits).
+const MinJWTSecretBytes = 32
 
 // Load reads the settings through getenv (os.Getenv in production, a map in tests).
 func Load(getenv func(string) string) (Config, error) {
@@ -51,6 +57,11 @@ func Load(getenv func(string) string) (Config, error) {
 		Env:         required("APP_ENV"),
 		HTTPAddr:    required("HTTP_ADDR"),
 		DatabaseURL: required("DATABASE_URL"),
+		JWTSecret:   []byte(required("JWT_SECRET")),
+	}
+	// The secret is never echoed back, only its length.
+	if n := len(cfg.JWTSecret); n > 0 && n < MinJWTSecretBytes {
+		errs = append(errs, fmt.Errorf("JWT_SECRET must have at least %d bytes, got %d (generate one with: openssl rand -base64 48)", MinJWTSecretBytes, n))
 	}
 
 	if cfg.Env != "" && cfg.Env != EnvDevelopment && cfg.Env != EnvProduction {
@@ -75,15 +86,22 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, fmt.Errorf("LOG_LEVEL must be debug, info, warn or error, got %q", level))
 	}
 
-	timeout := optional("SHUTDOWN_TIMEOUT", "15s")
-	d, err := time.ParseDuration(timeout)
-	switch {
-	case err != nil:
-		errs = append(errs, fmt.Errorf("SHUTDOWN_TIMEOUT must be a duration like 15s, got %q", timeout))
-	case d <= 0:
-		errs = append(errs, fmt.Errorf("SHUTDOWN_TIMEOUT must be positive, got %q", timeout))
-	default:
-		cfg.ShutdownTimeout = d
+	duration := func(key, def string) time.Duration {
+		text := optional(key, def)
+		d, err := time.ParseDuration(text)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("%s must be a duration like %s, got %q", key, def, text))
+		case d <= 0:
+			errs = append(errs, fmt.Errorf("%s must be positive, got %q", key, text))
+		}
+		return d
+	}
+	cfg.ShutdownTimeout = duration("SHUTDOWN_TIMEOUT", "15s")
+	cfg.AccessTokenTTL = duration("ACCESS_TOKEN_TTL", "15m")
+	cfg.RefreshTokenTTL = duration("REFRESH_TOKEN_TTL", "720h")
+	if cfg.AccessTokenTTL > 0 && cfg.RefreshTokenTTL > 0 && cfg.RefreshTokenTTL <= cfg.AccessTokenTTL {
+		errs = append(errs, errors.New("REFRESH_TOKEN_TTL must be longer than ACCESS_TOKEN_TTL"))
 	}
 
 	if len(errs) > 0 {
