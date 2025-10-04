@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,27 +16,61 @@ import (
 	"github.com/Kalki767/AddisHiwot/backend/internal/api"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/argon2id"
 	authhttp "github.com/Kalki767/AddisHiwot/backend/internal/auth/http"
+	"github.com/Kalki767/AddisHiwot/backend/internal/auth/jwttoken"
+	authpostgres "github.com/Kalki767/AddisHiwot/backend/internal/auth/postgres"
 	authusecase "github.com/Kalki767/AddisHiwot/backend/internal/auth/usecase"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/health"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/testdb"
+	usershttp "github.com/Kalki767/AddisHiwot/backend/internal/users/http"
 	userspostgres "github.com/Kalki767/AddisHiwot/backend/internal/users/postgres"
+	usersusecase "github.com/Kalki767/AddisHiwot/backend/internal/users/usecase"
 )
 
-// Everything real (router, use case, Argon2id, PostgreSQL) except a cheaper hash cost.
-func newServer(t *testing.T) (http.Handler, *pgxpool.Pool) {
+// testClock is a clock the test can move forward.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *testClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// Everything real (router, use cases, Argon2id, JWT, PostgreSQL) except a
+// cheaper hash cost and a movable clock.
+func newServer(t *testing.T) (http.Handler, *pgxpool.Pool, *testClock) {
 	t.Helper()
 	pool := testdb.New(t)
-	hasher := argon2id.New(argon2id.Params{MemoryKiB: 64, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32})
-	svc, err := authusecase.NewService(userspostgres.NewRepository(pool), hasher, time.Now)
+	clock := &testClock{now: time.Now()}
+	tokens, err := jwttoken.New([]byte("end-to-end-test-secret-at-least-32-bytes"), 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersRepo := userspostgres.NewRepository(pool)
+	svc, err := authusecase.NewService(authusecase.Deps{
+		Users:      usersRepo,
+		Sessions:   authpostgres.NewSessions(pool),
+		Hasher:     argon2id.New(argon2id.Params{MemoryKiB: 64, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}),
+		Tokens:     tokens,
+		Now:        clock.Now,
+		RefreshTTL: 30 * 24 * time.Hour,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.DiscardHandler)
+	auth := authhttp.New(svc, logger)
 	return api.NewRouter(api.Deps{
-		Logger:   logger,
-		Health:   health.New(pool, time.Second, logger),
-		Features: []api.Registrar{authhttp.New(svc, logger)},
-	}), pool
+		Logger: logger,
+		Health: health.New(pool, time.Second, logger),
+		Features: []api.Registrar{
+			auth,
+			usershttp.New(usersusecase.NewService(usersRepo), logger, auth.RequireAuth),
+		},
+	}), pool, clock
 }
 
 func post(h http.Handler, path, body string) *httptest.ResponseRecorder {
@@ -63,7 +98,7 @@ func withoutRequestID(t *testing.T, body string) string {
 }
 
 func TestSignupAndLoginEndToEnd(t *testing.T) {
-	h, pool := newServer(t)
+	h, pool, _ := newServer(t)
 	ctx := context.Background()
 
 	first := post(h, "/v1/auth/signup", signupJSON("KidistA", "kidist@example.com"))
@@ -113,5 +148,110 @@ func TestSignupAndLoginEndToEnd(t *testing.T) {
 	}
 	if withoutRequestID(t, wrongPassword.Body.String()) != withoutRequestID(t, unknown.Body.String()) {
 		t.Errorf("a wrong password and an unknown account must look the same:\n%s\n%s", wrongPassword.Body, unknown.Body)
+	}
+}
+
+type tokens struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+func tokensFrom(t *testing.T, rec *httptest.ResponseRecorder) tokens {
+	t.Helper()
+	var body struct {
+		Tokens tokens `json:"tokens"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Tokens.AccessToken == "" {
+		t.Fatalf("no tokens in %d %s", rec.Code, rec.Body)
+	}
+	return body.Tokens
+}
+
+func me(h http.Handler, accessToken string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func refresh(h http.Handler, refreshToken string) *httptest.ResponseRecorder {
+	return post(h, "/v1/auth/refresh", `{"refresh_token":"`+refreshToken+`"}`)
+}
+
+func code(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	return env.Error.Code
+}
+
+func TestSessionsEndToEnd(t *testing.T) {
+	h, pool, clock := newServer(t)
+	ctx := context.Background()
+	if rec := post(h, "/v1/auth/signup", signupJSON("KidistA", "kidist@example.com")); rec.Code != http.StatusAccepted {
+		t.Fatalf("signup: %d %s", rec.Code, rec.Body)
+	}
+	loginBody := `{"identifier":"kidista","password":"correct horse battery"}`
+
+	// Logged in: the access token opens /v1/me; no token does not.
+	first := tokensFrom(t, post(h, "/v1/auth/login", loginBody))
+	if rec := me(h, first.AccessToken); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"username":"KidistA"`) {
+		t.Fatalf("/v1/me: %d %s", rec.Code, rec.Body)
+	}
+	if rec := me(h, ""); rec.Code != http.StatusUnauthorized || code(t, rec) != "UNAUTHENTICATED" {
+		t.Errorf("/v1/me without a token: %d %s", rec.Code, rec.Body)
+	}
+
+	// Rotation: the refresh token is exchanged for a new pair.
+	second := tokensFrom(t, refresh(h, first.RefreshToken))
+	if second.RefreshToken == first.RefreshToken {
+		t.Fatal("refresh token was not rotated")
+	}
+	if rec := me(h, second.AccessToken); rec.Code != http.StatusOK {
+		t.Errorf("new access token: %d", rec.Code)
+	}
+
+	// Reuse: someone presents the old refresh token. The whole family dies.
+	if rec := refresh(h, first.RefreshToken); rec.Code != http.StatusUnauthorized || code(t, rec) != "INVALID_REFRESH_TOKEN" {
+		t.Fatalf("reused token: %d %s", rec.Code, rec.Body)
+	}
+	if rec := refresh(h, second.RefreshToken); rec.Code != http.StatusUnauthorized {
+		t.Errorf("newest token after reuse: %d, want 401 (family revoked)", rec.Code)
+	}
+	var reason string
+	if err := pool.QueryRow(ctx, `SELECT revoked_reason FROM auth_sessions`).Scan(&reason); err != nil || reason != "reuse_detected" {
+		t.Errorf("revoked_reason = %q, %v", reason, err)
+	}
+	var stored int
+	_ = pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE token_hash = convert_to($1, 'UTF8')`, first.RefreshToken).Scan(&stored)
+	if stored != 0 {
+		t.Error("a refresh token was stored in plain text")
+	}
+
+	// Logout ends a fresh session.
+	third := tokensFrom(t, post(h, "/v1/auth/login", loginBody))
+	if rec := post(h, "/v1/auth/logout", `{"refresh_token":"`+third.RefreshToken+`"}`); rec.Code != http.StatusNoContent {
+		t.Errorf("logout: %d %s", rec.Code, rec.Body)
+	}
+	if rec := refresh(h, third.RefreshToken); rec.Code != http.StatusUnauthorized {
+		t.Errorf("refresh after logout: %d", rec.Code)
+	}
+
+	// Plan check: an expired access token gives 401 TOKEN_EXPIRED.
+	fourth := tokensFrom(t, post(h, "/v1/auth/login", loginBody))
+	clock.Advance(16 * time.Minute)
+	if rec := me(h, fourth.AccessToken); rec.Code != http.StatusUnauthorized || code(t, rec) != "TOKEN_EXPIRED" {
+		t.Errorf("expired access token: %d %s", rec.Code, rec.Body)
+	}
+	// ...and the refresh token still works, so the app can recover silently.
+	if rec := refresh(h, fourth.RefreshToken); rec.Code != http.StatusOK {
+		t.Errorf("refresh after access expiry: %d %s", rec.Code, rec.Body)
 	}
 }

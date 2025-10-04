@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	authdomain "github.com/Kalki767/AddisHiwot/backend/internal/auth/domain"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/validate"
 	usersdomain "github.com/Kalki767/AddisHiwot/backend/internal/users/domain"
@@ -24,25 +26,50 @@ const DefaultTimezone = "Africa/Addis_Ababa"
 // Same rule as the users_username_format check in the database.
 var usernamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]{2,19}$`)
 
-// Service signs people up and logs them in.
+// Deps are what the Service needs; every field is required.
+type Deps struct {
+	Users      usersdomain.Repository
+	Sessions   authdomain.SessionRepository
+	Hasher     authdomain.PasswordHasher
+	Tokens     authdomain.AccessTokens
+	Now        func() time.Time
+	RefreshTTL time.Duration // how long a refresh token can be used
+}
+
+// Service signs people up, logs them in and manages their sessions.
 type Service struct {
-	users     usersdomain.Repository
-	hasher    authdomain.PasswordHasher
-	now       func() time.Time
+	Deps
 	dummyHash string
 }
 
 // NewService prepares a dummy hash of a random password. Logins for accounts
 // that do not exist are checked against it, so a failed login takes as long
 // whether or not the account exists.
-func NewService(users usersdomain.Repository, hasher authdomain.PasswordHasher, now func() time.Time) (*Service, error) {
+func NewService(d Deps) (*Service, error) {
+	if d.Users == nil || d.Sessions == nil || d.Hasher == nil || d.Tokens == nil || d.Now == nil || d.RefreshTTL <= 0 {
+		return nil, errors.New("auth: every dependency is required")
+	}
 	random := make([]byte, 32)
 	_, _ = rand.Read(random)
-	dummy, err := hasher.Hash(hex.EncodeToString(random))
+	dummy, err := d.Hasher.Hash(hex.EncodeToString(random))
 	if err != nil {
 		return nil, fmt.Errorf("auth: dummy hash: %w", err)
 	}
-	return &Service{users: users, hasher: hasher, now: now, dummyHash: dummy}, nil
+	return &Service{Deps: d, dummyHash: dummy}, nil
+}
+
+// Tokens is what a client keeps after logging in or refreshing.
+type Tokens struct {
+	AccessToken      string
+	AccessExpiresAt  time.Time
+	RefreshToken     string
+	RefreshExpiresAt time.Time
+}
+
+// LoginResult is the logged-in user and the tokens of the new session.
+type LoginResult struct {
+	User   usersdomain.User
+	Tokens Tokens
 }
 
 // SignupInput is what the sign-up screen sends.
@@ -89,13 +116,13 @@ func (s *Service) Signup(ctx context.Context, in SignupInput) (SignupOutcome, er
 	}
 
 	// Hash before touching the database, so a duplicate email costs the same time.
-	hash, err := s.hasher.Hash(in.Password)
+	hash, err := s.Hasher.Hash(in.Password)
 	if err != nil {
 		return 0, err
 	}
-	now := s.now().UTC()
+	now := s.Now().UTC()
 	terms := authdomain.TermsVersion
-	_, err = s.users.Create(ctx, usersdomain.NewUser{
+	_, err = s.Users.Create(ctx, usersdomain.NewUser{
 		Email:            in.Email,
 		Username:         in.Username,
 		PasswordHash:     &hash,
@@ -118,10 +145,23 @@ func (s *Service) Signup(ctx context.Context, in SignupInput) (SignupOutcome, er
 	}
 }
 
-// Login checks an email or username and a password. Every failure that depends
-// on the account (no such account, Google-only account, wrong password) returns
-// authdomain.ErrInvalidCredentials after the same amount of hashing work.
-func (s *Service) Login(ctx context.Context, identifier, password string) (usersdomain.User, error) {
+// Login checks an email or username and a password and starts a session.
+// Every failure that depends on the account (no such account, Google-only
+// account, wrong password) returns authdomain.ErrInvalidCredentials after the
+// same amount of hashing work.
+func (s *Service) Login(ctx context.Context, identifier, password string) (LoginResult, error) {
+	user, err := s.checkCredentials(ctx, identifier, password)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	tokens, err := s.startSession(ctx, user.ID)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{User: user, Tokens: tokens}, nil
+}
+
+func (s *Service) checkCredentials(ctx context.Context, identifier, password string) (usersdomain.User, error) {
 	identifier = strings.TrimSpace(identifier)
 	var v validate.Validator
 	v.Check(identifier != "", "identifier", "required", "enter your email or username")
@@ -134,19 +174,19 @@ func (s *Service) Login(ctx context.Context, identifier, password string) (users
 	var user usersdomain.User
 	var err error
 	if strings.Contains(identifier, "@") {
-		user, err = s.users.GetByEmail(ctx, identifier)
+		user, err = s.Users.GetByEmail(ctx, identifier)
 	} else {
-		user, err = s.users.GetByUsername(ctx, identifier)
+		user, err = s.Users.GetByUsername(ctx, identifier)
 	}
 	if err != nil && !errors.Is(err, usersdomain.ErrNotFound) {
 		return usersdomain.User{}, err
 	}
 	if errors.Is(err, usersdomain.ErrNotFound) || user.PasswordHash == nil {
-		_, _ = s.hasher.Verify(password, s.dummyHash) // same work as a real check
+		_, _ = s.Hasher.Verify(password, s.dummyHash) // same work as a real check
 		return usersdomain.User{}, authdomain.ErrInvalidCredentials
 	}
 
-	ok, err := s.hasher.Verify(password, *user.PasswordHash)
+	ok, err := s.Hasher.Verify(password, *user.PasswordHash)
 	if err != nil {
 		return usersdomain.User{}, fmt.Errorf("auth: verify stored hash: %w", err)
 	}
@@ -154,4 +194,92 @@ func (s *Service) Login(ctx context.Context, identifier, password string) (users
 		return usersdomain.User{}, authdomain.ErrInvalidCredentials
 	}
 	return user, nil
+}
+
+// startSession creates a session with its first refresh token and issues an access token.
+func (s *Service) startSession(ctx context.Context, userID uuid.UUID) (Tokens, error) {
+	now := s.Now()
+	refresh, hash := authdomain.NewRefreshToken()
+	refreshExp := now.Add(s.RefreshTTL)
+	sessionID, err := s.Sessions.CreateSession(ctx, userID, hash, refreshExp)
+	if err != nil {
+		return Tokens{}, err
+	}
+	access, accessExp, err := s.Tokens.Issue(userID, sessionID, now)
+	if err != nil {
+		return Tokens{}, err
+	}
+	return Tokens{AccessToken: access, AccessExpiresAt: accessExp, RefreshToken: refresh, RefreshExpiresAt: refreshExp}, nil
+}
+
+// Refresh exchanges a refresh token for a new access token and a new refresh
+// token (rotation). The old refresh token can never be used again: if it is,
+// someone copied it, so the whole session is revoked and
+// authdomain.ErrRefreshTokenReused is returned. An unknown, expired or revoked
+// token gives authdomain.ErrInvalidRefreshToken.
+func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
+	if refreshToken == "" {
+		return Tokens{}, authdomain.ErrInvalidRefreshToken
+	}
+	rec, err := s.Sessions.GetRefreshToken(ctx, authdomain.HashRefreshToken(refreshToken))
+	if err != nil {
+		return Tokens{}, err
+	}
+	if rec.SessionRevoked {
+		return Tokens{}, authdomain.ErrInvalidRefreshToken
+	}
+	if rec.Used {
+		return Tokens{}, s.revokeForReuse(ctx, rec.SessionID)
+	}
+	now := s.Now()
+	if !now.Before(rec.ExpiresAt) {
+		return Tokens{}, authdomain.ErrInvalidRefreshToken
+	}
+
+	next, nextHash := authdomain.NewRefreshToken()
+	nextExp := now.Add(s.RefreshTTL)
+	if err := s.Sessions.Rotate(ctx, rec.ID, rec.SessionID, nextHash, nextExp); err != nil {
+		if errors.Is(err, authdomain.ErrRefreshTokenReused) { // another request used it first
+			return Tokens{}, s.revokeForReuse(ctx, rec.SessionID)
+		}
+		return Tokens{}, err
+	}
+	access, accessExp, err := s.Tokens.Issue(rec.UserID, rec.SessionID, now)
+	if err != nil {
+		return Tokens{}, err
+	}
+	return Tokens{AccessToken: access, AccessExpiresAt: accessExp, RefreshToken: next, RefreshExpiresAt: nextExp}, nil
+}
+
+func (s *Service) revokeForReuse(ctx context.Context, sessionID uuid.UUID) error {
+	if err := s.Sessions.RevokeSession(ctx, sessionID, authdomain.RevokeReuseDetected); err != nil {
+		return err
+	}
+	return authdomain.ErrRefreshTokenReused
+}
+
+// Logout ends the session of a refresh token. An unknown or already ended
+// session is not an error, so logout never reveals anything and can be retried.
+func (s *Service) Logout(ctx context.Context, refreshToken string) error {
+	if refreshToken == "" {
+		return nil
+	}
+	rec, err := s.Sessions.GetRefreshToken(ctx, authdomain.HashRefreshToken(refreshToken))
+	if errors.Is(err, authdomain.ErrInvalidRefreshToken) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.Sessions.RevokeSession(ctx, rec.SessionID, authdomain.RevokeLogout)
+}
+
+// Authenticate checks an access token and returns who it belongs to. It returns
+// authdomain.ErrTokenExpired (the client should refresh) or authdomain.ErrInvalidToken.
+func (s *Service) Authenticate(accessToken string) (authdomain.Principal, error) {
+	c, err := s.Tokens.Verify(accessToken, s.Now())
+	if err != nil {
+		return authdomain.Principal{}, err
+	}
+	return authdomain.Principal{UserID: c.UserID, SessionID: c.SessionID}, nil
 }

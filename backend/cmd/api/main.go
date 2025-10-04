@@ -21,12 +21,16 @@ import (
 	"github.com/Kalki767/AddisHiwot/backend/internal/api"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/argon2id"
 	authhttp "github.com/Kalki767/AddisHiwot/backend/internal/auth/http"
+	"github.com/Kalki767/AddisHiwot/backend/internal/auth/jwttoken"
+	authpostgres "github.com/Kalki767/AddisHiwot/backend/internal/auth/postgres"
 	authusecase "github.com/Kalki767/AddisHiwot/backend/internal/auth/usecase"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/config"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/database"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/health"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/httpx"
+	usershttp "github.com/Kalki767/AddisHiwot/backend/internal/users/http"
 	userspostgres "github.com/Kalki767/AddisHiwot/backend/internal/users/postgres"
+	usersusecase "github.com/Kalki767/AddisHiwot/backend/internal/users/usecase"
 )
 
 func main() {
@@ -59,16 +63,32 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
-	authService, err := authusecase.NewService(userspostgres.NewRepository(pool), argon2id.New(argon2id.OWASPMinimum), time.Now)
+	tokens, err := jwttoken.New(cfg.JWTSecret, cfg.AccessTokenTTL)
 	if err != nil {
 		return err
 	}
+	usersRepo := userspostgres.NewRepository(pool)
+	authService, err := authusecase.NewService(authusecase.Deps{
+		Users:      usersRepo,
+		Sessions:   authpostgres.NewSessions(pool),
+		Hasher:     argon2id.New(argon2id.OWASPMinimum),
+		Tokens:     tokens,
+		Now:        time.Now,
+		RefreshTTL: cfg.RefreshTokenTTL,
+	})
+	if err != nil {
+		return err
+	}
+	authHandler := authhttp.New(authService, logger)
 
 	checker := health.New(pool, 2*time.Second, logger)
 	srv := httpx.NewServer(api.NewRouter(api.Deps{
-		Logger:   logger,
-		Health:   checker,
-		Features: []api.Registrar{authhttp.New(authService, logger)},
+		Logger: logger,
+		Health: checker,
+		Features: []api.Registrar{
+			authHandler,
+			usershttp.New(usersusecase.NewService(usersRepo), logger, authHandler.RequireAuth),
+		},
 	}))
 	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelWarn)
 

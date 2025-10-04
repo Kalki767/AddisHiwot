@@ -73,7 +73,8 @@ var fixedNow = time.Date(2026, 10, 26, 9, 0, 0, 0, time.FixedZone("EAT", 3*3600)
 func newService(t *testing.T) (*Service, *fakeUsers, *fakeHasher) {
 	t.Helper()
 	users, hasher := newFakeUsers(), &fakeHasher{}
-	svc, err := NewService(users, hasher, func() time.Time { return fixedNow })
+	svc, err := NewService(Deps{Users: users, Sessions: newFakeSessions(), Hasher: hasher, Tokens: fakeTokens{},
+		Now: func() time.Time { return fixedNow }, RefreshTTL: 30 * 24 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,9 +213,9 @@ func signedUp(t *testing.T) (*Service, *fakeHasher) {
 func TestLoginWithEmailOrUsername(t *testing.T) {
 	for _, id := range []string{"kidist@example.com", "KIDIST@Example.com", "KidistA", "kidista", "  kidista  "} {
 		svc, _ := signedUp(t)
-		u, err := svc.Login(context.Background(), id, "correct horse battery")
-		if err != nil || u.Username != "KidistA" {
-			t.Errorf("Login(%q) = %+v, %v", id, u.Username, err)
+		res, err := svc.Login(context.Background(), id, "correct horse battery")
+		if err != nil || res.User.Username != "KidistA" {
+			t.Errorf("Login(%q) = %+v, %v", id, res.User.Username, err)
 		}
 	}
 }
@@ -246,11 +247,7 @@ func TestLoginWithAnUnknownAccountRunsADummyCompare(t *testing.T) {
 }
 
 func TestLoginToAGoogleOnlyAccountRunsADummyCompare(t *testing.T) {
-	users, hasher := newFakeUsers(), &fakeHasher{}
-	svc, err := NewService(users, hasher, time.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
+	svc, users, hasher := newService(t)
 	if _, err := users.Create(context.Background(), usersdomain.NewUser{Email: "g@example.com", Username: "googler"}); err != nil {
 		t.Fatal(err)
 	}
