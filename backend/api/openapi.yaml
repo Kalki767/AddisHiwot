@@ -97,6 +97,7 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "500": { $ref: "#/components/responses/Internal" }
   /v1/auth/login:
@@ -133,9 +134,70 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         "413": { $ref: "#/components/responses/PayloadTooLarge" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  /v1/auth/verify-email:
+    post:
+      tags: [auth]
+      operationId: verifyEmail
+      summary: Verify the email with the 5-digit code, and log in.
+      description: |
+        The code from the newest email works for 10 minutes and 5 attempts. A wrong, expired, used-up or
+        replaced code, and an email without an account, all answer the same 400 INVALID_CODE, so this
+        endpoint cannot be used to find out who has an account. On success the email is verified and a
+        session starts.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VerifyEmailRequest" }
+      responses:
+        "200":
+          description: "Verified and logged in. Sent with `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, tokens]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  tokens: { $ref: "#/components/schemas/Tokens" }
+        "400":
+          description: Wrong or expired code (INVALID_CODE), or a malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/auth/resend-code:
+    post:
+      tags: [auth]
+      operationId: resendCode
+      summary: Email a new verification code.
+      description: |
+        Always answers 202 with the same body as sign-up, whether or not the email has an unverified account.
+        At most 5 codes per account per hour; a new code replaces the previous one.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResendCodeRequest" }
+      responses:
+        "202":
+          description: Accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignupAccepted" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
   /v1/auth/refresh:
     post:
       tags: [auth]
@@ -168,6 +230,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
   /v1/auth/logout:
     post:
@@ -185,6 +248,7 @@ paths:
         "204": { description: The session is ended. }
         "400": { $ref: "#/components/responses/BadRequest" }
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
   /v1/me:
     get:
@@ -257,7 +321,8 @@ components:
               description: Stable machine-readable code.
               enum: [BAD_JSON, EMPTY_BODY, UNKNOWN_FIELD, BODY_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE,
                      VALIDATION_FAILED, BAD_CURSOR, NOT_FOUND, METHOD_NOT_ALLOWED, INTERNAL,
-                     INVALID_CREDENTIALS, INVALID_REFRESH_TOKEN, UNAUTHENTICATED, TOKEN_EXPIRED, INVALID_TOKEN]
+                     INVALID_CREDENTIALS, INVALID_REFRESH_TOKEN, UNAUTHENTICATED, TOKEN_EXPIRED, INVALID_TOKEN,
+                     INVALID_CODE, RATE_LIMITED]
             message:
               type: string
               description: English explanation for developers and logs; not shown to users as is.
@@ -309,7 +374,7 @@ components:
         password: { type: string }
     User:
       type: object
-      required: [id, username, email, display_name, locale, timezone, created_at]
+      required: [id, username, email, display_name, locale, timezone, email_verified, created_at]
       properties:
         id: { type: string, format: uuid }
         username: { type: string }
@@ -317,6 +382,7 @@ components:
         display_name: { type: string }
         locale: { type: string, enum: [en, am] }
         timezone: { type: string, examples: [Africa/Addis_Ababa] }
+        email_verified: { type: boolean, description: False until the email code was entered. }
         created_at: { type: string, format: date-time }
     Tokens:
       type: object
@@ -327,6 +393,19 @@ components:
         access_token_expires_at: { type: string, format: date-time }
         refresh_token: { type: string, description: Opaque; store securely on the device. }
         refresh_token_expires_at: { type: string, format: date-time }
+    VerifyEmailRequest:
+      type: object
+      additionalProperties: false
+      required: [email, code]
+      properties:
+        email: { type: string, format: email }
+        code: { type: string, pattern: "^[0-9]{5}$" }
+    ResendCodeRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email: { type: string, format: email }
     RefreshRequest:
       type: object
       additionalProperties: false
@@ -343,6 +422,15 @@ components:
           description: Pass as `?cursor=` to get the next page; `null` on the last page.
 
   responses:
+    TooManyRequests:
+      description: Too many requests from this IP or for this account (RATE_LIMITED); wait Retry-After seconds.
+      headers:
+        Retry-After:
+          description: Seconds to wait before trying again.
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
     Unauthorized:
       description: |
         No valid access token. `UNAUTHENTICATED`: none was sent. `TOKEN_EXPIRED`: refresh, then retry.
