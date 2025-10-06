@@ -26,7 +26,8 @@ type fakeSessions struct {
 type fakeToken struct {
 	id, session, user uuid.UUID
 	expires           time.Time
-	used              bool
+	usedAt            *time.Time
+	replacedBy        *uuid.UUID
 }
 
 func newFakeSessions() *fakeSessions {
@@ -49,27 +50,62 @@ func (f *fakeSessions) GetRefreshToken(_ context.Context, hash []byte) (authdoma
 		return authdomain.RefreshTokenRecord{}, authdomain.ErrInvalidRefreshToken
 	}
 	_, revoked := f.revoked[t.session]
+	successorUsed := false
+	if t.replacedBy != nil {
+		for _, n := range f.tokens {
+			if n.id == *t.replacedBy && n.usedAt != nil {
+				successorUsed = true
+			}
+		}
+	}
 	return authdomain.RefreshTokenRecord{ID: t.id, SessionID: t.session, UserID: t.user, ExpiresAt: t.expires,
-		Used: t.used, SessionRevoked: revoked}, nil
+		UsedAt: t.usedAt, SuccessorID: t.replacedBy, SuccessorUsed: successorUsed, SessionRevoked: revoked}, nil
 }
 
-func (f *fakeSessions) Rotate(_ context.Context, oldID, sid uuid.UUID, newHash []byte, exp time.Time) error {
+func (f *fakeSessions) Rotate(_ context.Context, oldID, sid uuid.UUID, newHash []byte, exp, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.raceLoser {
 		return authdomain.ErrRefreshTokenReused
 	}
+	return f.replace(oldID, sid, newHash, exp, now)
+}
+
+func (f *fakeSessions) Reissue(_ context.Context, oldID, successorID, sid uuid.UUID, newHash []byte, exp, now time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	successor, old := f.byID(successorID), f.byID(oldID)
+	if successor.usedAt != nil {
+		return authdomain.ErrRefreshTokenReused
+	}
+	next := &fakeToken{id: uuid.New(), session: sid, user: old.user, expires: exp}
+	successor.usedAt, successor.replacedBy = &now, nil
+	old.replacedBy = &next.id
+	f.tokens[string(newHash)] = next
+	return nil
+}
+
+func (f *fakeSessions) byID(id uuid.UUID) *fakeToken {
 	for _, t := range f.tokens {
-		if t.id == oldID {
-			if t.used {
-				return authdomain.ErrRefreshTokenReused
-			}
-			t.used = true
-			f.tokens[string(newHash)] = &fakeToken{id: uuid.New(), session: sid, user: t.user, expires: exp}
-			return nil
+		if t.id == id {
+			return t
 		}
 	}
-	return authdomain.ErrInvalidRefreshToken
+	return &fakeToken{}
+}
+
+func (f *fakeSessions) replace(id, sid uuid.UUID, newHash []byte, exp, now time.Time) error {
+	t := f.byID(id)
+	if t.id == uuid.Nil {
+		return authdomain.ErrInvalidRefreshToken
+	}
+	if t.usedAt != nil {
+		return authdomain.ErrRefreshTokenReused
+	}
+	next := &fakeToken{id: uuid.New(), session: sid, user: t.user, expires: exp}
+	t.usedAt, t.replacedBy = &now, &next.id
+	f.tokens[string(newHash)] = next
+	return nil
 }
 
 func (f *fakeSessions) RevokeSession(_ context.Context, sid uuid.UUID, reason authdomain.RevokeReason) error {
@@ -168,12 +204,13 @@ func TestRefreshRotates(t *testing.T) {
 
 // Plan check: reusing an old refresh token revokes the whole session family.
 func TestReusingAnOldRefreshTokenRevokesTheSession(t *testing.T) {
-	svc, sessions, _ := sessionService(t)
+	svc, sessions, now := sessionService(t)
 	stolen := login(t, svc).Tokens
 	current, err := svc.Refresh(context.Background(), stolen.RefreshToken) // the owner refreshes
 	if err != nil {
 		t.Fatal(err)
 	}
+	*now = now.Add(authdomain.RefreshReuseGrace + time.Second) // later than any network retry
 
 	// The thief tries the copied (already used) token.
 	if _, err := svc.Refresh(context.Background(), stolen.RefreshToken); !errors.Is(err, authdomain.ErrRefreshTokenReused) {
@@ -257,5 +294,86 @@ func TestAuthenticateExpiredAccessToken(t *testing.T) {
 func TestNewServiceRequiresEveryDependency(t *testing.T) {
 	if _, err := NewService(Deps{Users: newFakeUsers()}); err == nil {
 		t.Error("missing dependencies were accepted")
+	}
+}
+
+// A refresh whose response was lost: the app retries with the token it still
+// has, moments later. It gets a fresh pair instead of being logged out.
+func TestRetryAfterALostResponseGetsAFreshToken(t *testing.T) {
+	svc, sessions, now := sessionService(t)
+	first := login(t, svc).Tokens
+	lost, err := svc.Refresh(context.Background(), first.RefreshToken) // response never arrives
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(5 * time.Second)
+	retried, err := svc.Refresh(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("retry within the grace period: %v", err)
+	}
+	if retried.RefreshToken == lost.RefreshToken || len(sessions.revoked) != 0 {
+		t.Errorf("want a new token and no revocation (revoked %d)", len(sessions.revoked))
+	}
+	// A second retry of the same token (still within the window) works too.
+	again, err := svc.Refresh(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("second retry: %v", err)
+	}
+	// The newest token works.
+	if _, err := svc.Refresh(context.Background(), again.RefreshToken); err != nil {
+		t.Errorf("token from the retry: %v", err)
+	}
+}
+
+// The token whose response was lost was never delivered: if it shows up anyway,
+// someone intercepted it. It must never count as a retry.
+func TestTheUndeliveredTokenIsNeverARetry(t *testing.T) {
+	svc, sessions, now := sessionService(t)
+	first := login(t, svc).Tokens
+	lost, _ := svc.Refresh(context.Background(), first.RefreshToken)
+	*now = now.Add(time.Second)
+	if _, err := svc.Refresh(context.Background(), first.RefreshToken); err != nil { // the retry
+		t.Fatal(err)
+	}
+	if _, err := svc.Refresh(context.Background(), lost.RefreshToken); !errors.Is(err, authdomain.ErrRefreshTokenReused) {
+		t.Errorf("undelivered token: err = %v, want ErrRefreshTokenReused", err)
+	}
+	if len(sessions.revoked) != 1 {
+		t.Error("presenting an undelivered token must revoke the session")
+	}
+}
+
+func TestRetryAfterTheGracePeriodRevokes(t *testing.T) {
+	svc, sessions, now := sessionService(t)
+	first := login(t, svc).Tokens
+	if _, err := svc.Refresh(context.Background(), first.RefreshToken); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(authdomain.RefreshReuseGrace + time.Second)
+	if _, err := svc.Refresh(context.Background(), first.RefreshToken); !errors.Is(err, authdomain.ErrRefreshTokenReused) {
+		t.Errorf("err = %v, want ErrRefreshTokenReused", err)
+	}
+	if len(sessions.revoked) != 1 {
+		t.Error("session not revoked")
+	}
+}
+
+// If the replacement was already used, someone else holds the chain: a copy.
+func TestReuseAfterTheReplacementWasUsedRevokesEvenWithinGrace(t *testing.T) {
+	svc, sessions, now := sessionService(t)
+	first := login(t, svc).Tokens
+	second, err := svc.Refresh(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Refresh(context.Background(), second.RefreshToken); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(2 * time.Second)
+	if _, err := svc.Refresh(context.Background(), first.RefreshToken); !errors.Is(err, authdomain.ErrRefreshTokenReused) {
+		t.Errorf("err = %v, want ErrRefreshTokenReused", err)
+	}
+	if len(sessions.revoked) != 1 {
+		t.Error("session not revoked")
 	}
 }

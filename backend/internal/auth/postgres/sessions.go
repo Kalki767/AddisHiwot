@@ -44,7 +44,8 @@ func (s *Sessions) CreateSession(ctx context.Context, userID uuid.UUID, tokenHas
 			return err
 		}
 		sessionID = session.ID
-		return q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{SessionID: session.ID, TokenHash: tokenHash, ExpiresAt: expiresAt})
+		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{SessionID: session.ID, TokenHash: tokenHash, ExpiresAt: expiresAt})
+		return err
 	})
 	if err != nil {
 		return uuid.UUID{}, fmt.Errorf("auth: create session: %w", err)
@@ -63,29 +64,63 @@ func (s *Sessions) GetRefreshToken(ctx context.Context, tokenHash []byte) (domai
 	}
 	return domain.RefreshTokenRecord{
 		ID: row.ID, SessionID: row.SessionID, UserID: row.UserID, ExpiresAt: row.ExpiresAt,
-		Used: row.UsedAt != nil, SessionRevoked: row.RevokedAt != nil,
+		UsedAt: row.UsedAt, SuccessorID: row.ReplacedBy, SuccessorUsed: row.SuccessorUsed,
+		SessionRevoked: row.RevokedAt != nil,
 	}, nil
 }
 
-// Rotate marks the old token used and stores the next one. The UPDATE only
-// succeeds for a token not used yet, so of two requests racing with the same
-// token exactly one wins; the other gets ErrRefreshTokenReused.
-func (s *Sessions) Rotate(ctx context.Context, oldTokenID, sessionID uuid.UUID, newHash []byte, newExpiresAt time.Time) error {
+// Rotate stores the next token and marks the old one used and replaced by it.
+// The UPDATE only succeeds for a token not used yet, so of two requests racing
+// with the same token exactly one wins; the other's transaction rolls back
+// (its new token disappears) and it gets ErrRefreshTokenReused.
+func (s *Sessions) Rotate(ctx context.Context, oldTokenID, sessionID uuid.UUID, newHash []byte, newExpiresAt, now time.Time) error {
 	err := s.inTx(ctx, func(q *db.Queries) error {
-		n, err := q.MarkRefreshTokenUsed(ctx, oldTokenID)
+		newID, err := q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{SessionID: sessionID, TokenHash: newHash, ExpiresAt: newExpiresAt})
 		if err != nil {
 			return err
 		}
-		if n == 0 {
-			return domain.ErrRefreshTokenReused
-		}
-		if err := q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{SessionID: sessionID, TokenHash: newHash, ExpiresAt: newExpiresAt}); err != nil {
+		if err := markUsed(ctx, q, oldTokenID, now, &newID); err != nil {
 			return err
 		}
 		return q.TouchSession(ctx, sessionID)
 	})
+	return wrap("rotate", err)
+}
+
+// Reissue answers a retry: the undelivered successor is used up with no
+// successor of its own, and the new token becomes oldTokenID's successor.
+func (s *Sessions) Reissue(ctx context.Context, oldTokenID, successorID, sessionID uuid.UUID, newHash []byte, newExpiresAt, now time.Time) error {
+	err := s.inTx(ctx, func(q *db.Queries) error {
+		newID, err := q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{SessionID: sessionID, TokenHash: newHash, ExpiresAt: newExpiresAt})
+		if err != nil {
+			return err
+		}
+		if err := markUsed(ctx, q, successorID, now, nil); err != nil {
+			return err
+		}
+		if err := q.SetRefreshTokenReplacedBy(ctx, db.SetRefreshTokenReplacedByParams{ID: oldTokenID, ReplacedBy: &newID}); err != nil {
+			return err
+		}
+		return q.TouchSession(ctx, sessionID)
+	})
+	return wrap("reissue", err)
+}
+
+// markUsed uses up an unused token; ErrRefreshTokenReused if it was already used.
+func markUsed(ctx context.Context, q *db.Queries, id uuid.UUID, now time.Time, replacedBy *uuid.UUID) error {
+	n, err := q.MarkRefreshTokenUsed(ctx, db.MarkRefreshTokenUsedParams{ID: id, UsedAt: &now, ReplacedBy: replacedBy})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return domain.ErrRefreshTokenReused
+	}
+	return nil
+}
+
+func wrap(op string, err error) error {
 	if err != nil && !errors.Is(err, domain.ErrRefreshTokenReused) {
-		return fmt.Errorf("auth: rotate refresh token: %w", err)
+		return fmt.Errorf("auth: %s refresh token: %w", op, err)
 	}
 	return err
 }

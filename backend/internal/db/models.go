@@ -20,12 +20,13 @@ type AuthSession struct {
 }
 
 type RefreshToken struct {
-	ID        uuid.UUID
-	SessionID uuid.UUID
-	TokenHash []byte
-	CreatedAt time.Time
-	ExpiresAt time.Time
-	UsedAt    *time.Time
+	ID         uuid.UUID
+	SessionID  uuid.UUID
+	TokenHash  []byte
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	UsedAt     *time.Time
+	ReplacedBy *uuid.UUID
 }
 
 type User struct {

@@ -43,9 +43,18 @@ type RefreshTokenRecord struct {
 	SessionID      uuid.UUID
 	UserID         uuid.UUID
 	ExpiresAt      time.Time
-	Used           bool // already exchanged for a newer token
+	UsedAt         *time.Time // when it was exchanged for a newer token; nil if never
+	SuccessorID    *uuid.UUID // the token that replaced it
+	SuccessorUsed  bool       // whether that replacement was used in turn
 	SessionRevoked bool
 }
+
+// RefreshReuseGrace is how long after its use a refresh token may come back as
+// a retry. Mobile networks lose responses: the server rotates the token, the
+// answer never arrives, and the app retries with the token it still has. Within
+// this window, and only while the replacement was never used, the retry gets a
+// fresh token instead of ending the session.
+const RefreshReuseGrace = 30 * time.Second
 
 // SessionRepository stores sessions and their refresh tokens. Only hashes of
 // refresh tokens are ever stored.
@@ -54,10 +63,16 @@ type SessionRepository interface {
 	CreateSession(ctx context.Context, userID uuid.UUID, tokenHash []byte, expiresAt time.Time) (sessionID uuid.UUID, err error)
 	// GetRefreshToken returns ErrInvalidRefreshToken when no token has this hash.
 	GetRefreshToken(ctx context.Context, tokenHash []byte) (RefreshTokenRecord, error)
-	// Rotate marks oldTokenID used and stores the next token of the session, in one
-	// transaction. It returns ErrRefreshTokenReused if oldTokenID was already used,
-	// including by a request racing with this one.
-	Rotate(ctx context.Context, oldTokenID, sessionID uuid.UUID, newHash []byte, newExpiresAt time.Time) error
+	// Rotate marks oldTokenID used at now and stores the next token of the
+	// session, in one transaction. It returns ErrRefreshTokenReused if oldTokenID
+	// was already used, including by a request racing with this one.
+	Rotate(ctx context.Context, oldTokenID, sessionID uuid.UUID, newHash []byte, newExpiresAt, now time.Time) error
+	// Reissue answers a retry of oldTokenID: its successor, which must still be
+	// unused, is used up without a successor of its own (it was never delivered,
+	// so it can never count as a retry), and a new token becomes oldTokenID's
+	// successor, in one transaction. It returns ErrRefreshTokenReused if the
+	// successor was used.
+	Reissue(ctx context.Context, oldTokenID, successorID, sessionID uuid.UUID, newHash []byte, newExpiresAt, now time.Time) error
 	// RevokeSession ends a session; revoking an ended session is not an error.
 	RevokeSession(ctx context.Context, sessionID uuid.UUID, reason RevokeReason) error
 }

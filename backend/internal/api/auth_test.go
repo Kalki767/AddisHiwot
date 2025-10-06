@@ -15,6 +15,7 @@ import (
 
 	"github.com/Kalki767/AddisHiwot/backend/internal/api"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/argon2id"
+	authdomain "github.com/Kalki767/AddisHiwot/backend/internal/auth/domain"
 	authhttp "github.com/Kalki767/AddisHiwot/backend/internal/auth/http"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/jwttoken"
 	authpostgres "github.com/Kalki767/AddisHiwot/backend/internal/auth/postgres"
@@ -218,11 +219,25 @@ func TestSessionsEndToEnd(t *testing.T) {
 		t.Errorf("new access token: %d", rec.Code)
 	}
 
-	// Reuse: someone presents the old refresh token. The whole family dies.
+	// A lost response: the app retries moments later with the token it still has.
+	// It gets a fresh pair; the undelivered one is dead.
+	retried := tokensFrom(t, refresh(h, second.RefreshToken))
+	lost := tokensFrom(t, refresh(h, retried.RefreshToken)) // pretend this answer is lost
+	clock.Advance(5 * time.Second)
+	recovered := tokensFrom(t, refresh(h, retried.RefreshToken))
+	if rec := refresh(h, lost.RefreshToken); rec.Code != http.StatusUnauthorized {
+		t.Errorf("undelivered token after the retry: %d, want 401", rec.Code)
+	}
+	if rec := me(h, recovered.AccessToken); rec.Code != http.StatusOK {
+		t.Errorf("after a lost-response retry: %d", rec.Code)
+	}
+
+	// Reuse: later, someone presents an old refresh token. The whole family dies.
+	clock.Advance(authdomain.RefreshReuseGrace + time.Second)
 	if rec := refresh(h, first.RefreshToken); rec.Code != http.StatusUnauthorized || code(t, rec) != "INVALID_REFRESH_TOKEN" {
 		t.Fatalf("reused token: %d %s", rec.Code, rec.Body)
 	}
-	if rec := refresh(h, second.RefreshToken); rec.Code != http.StatusUnauthorized {
+	if rec := refresh(h, recovered.RefreshToken); rec.Code != http.StatusUnauthorized {
 		t.Errorf("newest token after reuse: %d, want 401 (family revoked)", rec.Code)
 	}
 	var reason string

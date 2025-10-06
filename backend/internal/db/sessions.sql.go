@@ -12,9 +12,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const createRefreshToken = `-- name: CreateRefreshToken :exec
+const createRefreshToken = `-- name: CreateRefreshToken :one
 INSERT INTO refresh_tokens (session_id, token_hash, expires_at)
 VALUES ($1, $2, $3)
+RETURNING id
 `
 
 type CreateRefreshTokenParams struct {
@@ -23,9 +24,11 @@ type CreateRefreshTokenParams struct {
 	ExpiresAt time.Time
 }
 
-func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error {
-	_, err := q.db.Exec(ctx, createRefreshToken, arg.SessionID, arg.TokenHash, arg.ExpiresAt)
-	return err
+func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, createRefreshToken, arg.SessionID, arg.TokenHash, arg.ExpiresAt)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const createSession = `-- name: CreateSession :one
@@ -47,22 +50,27 @@ func (q *Queries) CreateSession(ctx context.Context, userID uuid.UUID) (AuthSess
 }
 
 const getRefreshToken = `-- name: GetRefreshToken :one
-SELECT t.id, t.session_id, t.expires_at, t.used_at, s.user_id, s.revoked_at
+SELECT t.id, t.session_id, t.expires_at, t.used_at, t.replaced_by,
+       (n.used_at IS NOT NULL)::boolean AS successor_used,
+       s.user_id, s.revoked_at
 FROM refresh_tokens t
 JOIN auth_sessions s ON s.id = t.session_id
+LEFT JOIN refresh_tokens n ON n.id = t.replaced_by
 WHERE t.token_hash = $1
 `
 
 type GetRefreshTokenRow struct {
-	ID        uuid.UUID
-	SessionID uuid.UUID
-	ExpiresAt time.Time
-	UsedAt    *time.Time
-	UserID    uuid.UUID
-	RevokedAt *time.Time
+	ID            uuid.UUID
+	SessionID     uuid.UUID
+	ExpiresAt     time.Time
+	UsedAt        *time.Time
+	ReplacedBy    *uuid.UUID
+	SuccessorUsed bool
+	UserID        uuid.UUID
+	RevokedAt     *time.Time
 }
 
-// A token with its session, found by the token's hash.
+// A token with its session and whether the token that replaced it was used.
 func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash []byte) (GetRefreshTokenRow, error) {
 	row := q.db.QueryRow(ctx, getRefreshToken, tokenHash)
 	var i GetRefreshTokenRow
@@ -71,6 +79,8 @@ func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash []byte) (GetRef
 		&i.SessionID,
 		&i.ExpiresAt,
 		&i.UsedAt,
+		&i.ReplacedBy,
+		&i.SuccessorUsed,
 		&i.UserID,
 		&i.RevokedAt,
 	)
@@ -78,13 +88,21 @@ func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash []byte) (GetRef
 }
 
 const markRefreshTokenUsed = `-- name: MarkRefreshTokenUsed :execrows
-UPDATE refresh_tokens SET used_at = now() WHERE id = $1 AND used_at IS NULL
+UPDATE refresh_tokens SET used_at = $1, replaced_by = $2
+WHERE id = $3 AND used_at IS NULL
 `
 
+type MarkRefreshTokenUsedParams struct {
+	UsedAt     *time.Time
+	ReplacedBy *uuid.UUID
+	ID         uuid.UUID
+}
+
 // Succeeds (1 row) only for the first caller: two requests racing with the same
-// token cannot both rotate it.
-func (q *Queries) MarkRefreshTokenUsed(ctx context.Context, id uuid.UUID) (int64, error) {
-	result, err := q.db.Exec(ctx, markRefreshTokenUsed, id)
+// token cannot both rotate it. replaced_by is NULL for a token superseded by a
+// retry: it was never delivered, so presenting it can only mean a copy.
+func (q *Queries) MarkRefreshTokenUsed(ctx context.Context, arg MarkRefreshTokenUsedParams) (int64, error) {
+	result, err := q.db.Exec(ctx, markRefreshTokenUsed, arg.UsedAt, arg.ReplacedBy, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -107,6 +125,20 @@ func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) (i
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setRefreshTokenReplacedBy = `-- name: SetRefreshTokenReplacedBy :exec
+UPDATE refresh_tokens SET replaced_by = $1 WHERE id = $2
+`
+
+type SetRefreshTokenReplacedByParams struct {
+	ReplacedBy *uuid.UUID
+	ID         uuid.UUID
+}
+
+func (q *Queries) SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error {
+	_, err := q.db.Exec(ctx, setRefreshTokenReplacedBy, arg.ReplacedBy, arg.ID)
+	return err
 }
 
 const touchSession = `-- name: TouchSession :exec

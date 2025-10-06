@@ -43,7 +43,7 @@ func TestCreateAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.SessionID != sessionID || rec.UserID != userID || !rec.ExpiresAt.Equal(expires) || rec.Used || rec.SessionRevoked {
+	if rec.SessionID != sessionID || rec.UserID != userID || !rec.ExpiresAt.Equal(expires) || rec.UsedAt != nil || rec.SessionRevoked {
 		t.Errorf("record = %+v", rec)
 	}
 	if _, err := repo.GetRefreshToken(ctx, domain.HashRefreshToken("unknown")); !errors.Is(err, domain.ErrInvalidRefreshToken) {
@@ -59,18 +59,19 @@ func TestRotateMarksOldUsedAndStoresNew(t *testing.T) {
 	old, _ := repo.GetRefreshToken(ctx, oldHash)
 
 	_, newHash := domain.NewRefreshToken()
-	if err := repo.Rotate(ctx, old.ID, sessionID, newHash, expires); err != nil {
+	if err := repo.Rotate(ctx, old.ID, sessionID, newHash, expires, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if rec, _ := repo.GetRefreshToken(ctx, oldHash); !rec.Used {
-		t.Error("old token not marked used")
+	newRec, err := repo.GetRefreshToken(ctx, newHash)
+	if err != nil || newRec.UsedAt != nil || newRec.SessionID != sessionID {
+		t.Errorf("new token: %+v, %v", newRec, err)
 	}
-	if rec, err := repo.GetRefreshToken(ctx, newHash); err != nil || rec.Used || rec.SessionID != sessionID {
-		t.Errorf("new token: %+v, %v", rec, err)
+	if rec, _ := repo.GetRefreshToken(ctx, oldHash); rec.UsedAt == nil || rec.SuccessorID == nil || *rec.SuccessorID != newRec.ID || rec.SuccessorUsed {
+		t.Errorf("old token must be used and point at its unused replacement: %+v", rec)
 	}
 
 	_, thirdHash := domain.NewRefreshToken()
-	if err := repo.Rotate(ctx, old.ID, sessionID, thirdHash, expires); !errors.Is(err, domain.ErrRefreshTokenReused) {
+	if err := repo.Rotate(ctx, old.ID, sessionID, thirdHash, expires, time.Now()); !errors.Is(err, domain.ErrRefreshTokenReused) {
 		t.Errorf("rotating a used token: err = %v, want ErrRefreshTokenReused", err)
 	}
 	if _, err := repo.GetRefreshToken(ctx, thirdHash); !errors.Is(err, domain.ErrInvalidRefreshToken) {
@@ -92,7 +93,7 @@ func TestConcurrentRotationHasOneWinner(t *testing.T) {
 	for range racers {
 		wg.Go(func() {
 			_, newHash := domain.NewRefreshToken()
-			results <- repo.Rotate(ctx, old.ID, sessionID, newHash, expires)
+			results <- repo.Rotate(ctx, old.ID, sessionID, newHash, expires, time.Now())
 		})
 	}
 	wg.Wait()
@@ -140,5 +141,37 @@ func TestDeletingTheUserDeletesSessions(t *testing.T) {
 	}
 	if _, err := repo.GetRefreshToken(ctx, hash); !errors.Is(err, domain.ErrInvalidRefreshToken) {
 		t.Errorf("token survived its user: %v", err)
+	}
+}
+
+func TestReissueReplacesAnUnusedSuccessorOnce(t *testing.T) {
+	repo, _, userID := setup(t)
+	ctx := context.Background()
+	_, firstHash := domain.NewRefreshToken()
+	sessionID, _ := repo.CreateSession(ctx, userID, firstHash, expires)
+	first, _ := repo.GetRefreshToken(ctx, firstHash)
+	_, lostHash := domain.NewRefreshToken()
+	if err := repo.Rotate(ctx, first.ID, sessionID, lostHash, expires, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first, _ = repo.GetRefreshToken(ctx, firstHash)
+
+	_, retryHash := domain.NewRefreshToken()
+	if err := repo.Reissue(ctx, first.ID, *first.SuccessorID, sessionID, retryHash, expires, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if lost, _ := repo.GetRefreshToken(ctx, lostHash); lost.UsedAt == nil || lost.SuccessorID != nil {
+		t.Errorf("the undelivered token must be used up with no successor: %+v", lost)
+	}
+	retry, err := repo.GetRefreshToken(ctx, retryHash)
+	if err != nil || retry.UsedAt != nil {
+		t.Errorf("reissued token: %+v, %v", retry, err)
+	}
+	if again, _ := repo.GetRefreshToken(ctx, firstHash); again.SuccessorID == nil || *again.SuccessorID != retry.ID {
+		t.Error("the retried token must now point at the reissued one")
+	}
+	_, againHash := domain.NewRefreshToken()
+	if err := repo.Reissue(ctx, first.ID, *first.SuccessorID, sessionID, againHash, expires, time.Now()); !errors.Is(err, domain.ErrRefreshTokenReused) {
+		t.Errorf("reissuing the same undelivered token twice: err = %v, want ErrRefreshTokenReused", err)
 	}
 }

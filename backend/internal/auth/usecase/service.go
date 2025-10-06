@@ -213,10 +213,11 @@ func (s *Service) startSession(ctx context.Context, userID uuid.UUID) (Tokens, e
 }
 
 // Refresh exchanges a refresh token for a new access token and a new refresh
-// token (rotation). The old refresh token can never be used again: if it is,
-// someone copied it, so the whole session is revoked and
-// authdomain.ErrRefreshTokenReused is returned. An unknown, expired or revoked
-// token gives authdomain.ErrInvalidRefreshToken.
+// token (rotation). A used refresh token coming back means it was copied, so the
+// whole session is revoked and authdomain.ErrRefreshTokenReused is returned —
+// except a retry within authdomain.RefreshReuseGrace whose replacement was never
+// used (a lost response), which gets a fresh token. An unknown, expired or
+// revoked token gives authdomain.ErrInvalidRefreshToken.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, error) {
 	if refreshToken == "" {
 		return Tokens{}, authdomain.ErrInvalidRefreshToken
@@ -228,27 +229,49 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, err
 	if rec.SessionRevoked {
 		return Tokens{}, authdomain.ErrInvalidRefreshToken
 	}
-	if rec.Used {
-		return Tokens{}, s.revokeForReuse(ctx, rec.SessionID)
-	}
 	now := s.Now()
+	next, nextHash := authdomain.NewRefreshToken()
+	nextExp := now.Add(s.RefreshTTL)
+	if rec.UsedAt != nil {
+		if !isLostResponseRetry(rec, now) {
+			return Tokens{}, s.revokeForReuse(ctx, rec.SessionID)
+		}
+		// The client never received the token that replaced this one: replace it.
+		if err := s.Sessions.Reissue(ctx, rec.ID, *rec.SuccessorID, rec.SessionID, nextHash, nextExp, now); err != nil {
+			if errors.Is(err, authdomain.ErrRefreshTokenReused) {
+				return Tokens{}, s.revokeForReuse(ctx, rec.SessionID)
+			}
+			return Tokens{}, err
+		}
+		return s.issueAccess(rec, next, nextExp, now)
+	}
 	if !now.Before(rec.ExpiresAt) {
 		return Tokens{}, authdomain.ErrInvalidRefreshToken
 	}
 
-	next, nextHash := authdomain.NewRefreshToken()
-	nextExp := now.Add(s.RefreshTTL)
-	if err := s.Sessions.Rotate(ctx, rec.ID, rec.SessionID, nextHash, nextExp); err != nil {
+	if err := s.Sessions.Rotate(ctx, rec.ID, rec.SessionID, nextHash, nextExp, now); err != nil {
 		if errors.Is(err, authdomain.ErrRefreshTokenReused) { // another request used it first
 			return Tokens{}, s.revokeForReuse(ctx, rec.SessionID)
 		}
 		return Tokens{}, err
 	}
+	return s.issueAccess(rec, next, nextExp, now)
+}
+
+// isLostResponseRetry reports whether a used refresh token coming back looks
+// like a client retrying after a lost response, not a copied token: it was used
+// moments ago and the token that replaced it was never used.
+func isLostResponseRetry(rec authdomain.RefreshTokenRecord, now time.Time) bool {
+	return rec.UsedAt != nil && now.Sub(*rec.UsedAt) <= authdomain.RefreshReuseGrace &&
+		rec.SuccessorID != nil && !rec.SuccessorUsed
+}
+
+func (s *Service) issueAccess(rec authdomain.RefreshTokenRecord, refresh string, refreshExp, now time.Time) (Tokens, error) {
 	access, accessExp, err := s.Tokens.Issue(rec.UserID, rec.SessionID, now)
 	if err != nil {
 		return Tokens{}, err
 	}
-	return Tokens{AccessToken: access, AccessExpiresAt: accessExp, RefreshToken: next, RefreshExpiresAt: nextExp}, nil
+	return Tokens{AccessToken: access, AccessExpiresAt: accessExp, RefreshToken: refresh, RefreshExpiresAt: refreshExp}, nil
 }
 
 func (s *Service) revokeForReuse(ctx context.Context, sessionID uuid.UUID) error {
