@@ -59,6 +59,18 @@ func (f *fakeUsers) GetByUsername(_ context.Context, n string) (usersdomain.User
 	return f.find(func(u usersdomain.User) bool { return strings.EqualFold(u.Username, n) })
 }
 
+func (f *fakeUsers) MarkEmailVerified(_ context.Context, id uuid.UUID, at time.Time) error {
+	u, ok := f.byID[id]
+	if !ok {
+		return usersdomain.ErrNotFound
+	}
+	if u.EmailVerifiedAt == nil {
+		u.EmailVerifiedAt = &at
+		f.byID[id] = u
+	}
+	return nil
+}
+
 // fakeHasher stores "hash:<password>" and counts the work done.
 type fakeHasher struct{ hashes, verifies int }
 
@@ -73,8 +85,7 @@ var fixedNow = time.Date(2026, 10, 26, 9, 0, 0, 0, time.FixedZone("EAT", 3*3600)
 func newService(t *testing.T) (*Service, *fakeUsers, *fakeHasher) {
 	t.Helper()
 	users, hasher := newFakeUsers(), &fakeHasher{}
-	svc, err := NewService(Deps{Users: users, Sessions: newFakeSessions(), Hasher: hasher, Tokens: fakeTokens{},
-		Now: func() time.Time { return fixedNow }, RefreshTTL: 30 * 24 * time.Hour})
+	svc, err := NewService(testDeps(users, newFakeSessions(), hasher, func() time.Time { return fixedNow }))
 	if err != nil {
 		t.Fatal(err)
 	}

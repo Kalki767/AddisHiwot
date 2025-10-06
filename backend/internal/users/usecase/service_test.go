@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -19,8 +20,9 @@ func (o oneUser) GetByID(_ context.Context, id uuid.UUID) (domain.User, error) {
 	}
 	return o.u, nil
 }
-func (o oneUser) GetByEmail(context.Context, string) (domain.User, error)    { return o.u, nil }
-func (o oneUser) GetByUsername(context.Context, string) (domain.User, error) { return o.u, nil }
+func (o oneUser) GetByEmail(context.Context, string) (domain.User, error)       { return o.u, nil }
+func (o oneUser) GetByUsername(context.Context, string) (domain.User, error)    { return o.u, nil }
+func (o oneUser) MarkEmailVerified(context.Context, uuid.UUID, time.Time) error { return nil }
 
 func TestMe(t *testing.T) {
 	u := domain.User{ID: uuid.New(), Username: "kidista"}

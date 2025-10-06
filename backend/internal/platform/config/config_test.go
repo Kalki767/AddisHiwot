@@ -13,10 +13,13 @@ func env(m map[string]string) func(string) string {
 
 func valid() map[string]string {
 	return map[string]string{
-		"APP_ENV":      "development",
-		"HTTP_ADDR":    ":8080",
-		"DATABASE_URL": "postgres://u:secret-pw@localhost:5433/db?sslmode=disable",
-		"JWT_SECRET":   "a-dev-secret-that-is-at-least-32-bytes",
+		"APP_ENV":          "development",
+		"HTTP_ADDR":        ":8080",
+		"DATABASE_URL":     "postgres://u:secret-pw@localhost:5433/db?sslmode=disable",
+		"JWT_SECRET":       "a-dev-secret-that-is-at-least-32-bytes",
+		"AUTH_CODE_SECRET": "another-dev-secret-at-least-32-bytes",
+		"SMTP_ADDR":        "mailpit:1025",
+		"MAIL_FROM":        "Addis Hiwot <no-reply@addishiwot.test>",
 	}
 }
 
@@ -70,7 +73,7 @@ func TestLoadReportsEveryMissingValueAtOnce(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load with an empty environment succeeded")
 	}
-	for _, key := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "JWT_SECRET"} {
+	for _, key := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "JWT_SECRET", "AUTH_CODE_SECRET", "SMTP_ADDR", "MAIL_FROM"} {
 		if !strings.Contains(err.Error(), key+" is required") {
 			t.Errorf("error does not mention %s:\n%v", key, err)
 		}
@@ -91,6 +94,8 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		{"SHUTDOWN_TIMEOUT", "soon", "SHUTDOWN_TIMEOUT must be a duration"},
 		{"SHUTDOWN_TIMEOUT", "-1s", "SHUTDOWN_TIMEOUT must be positive"},
 		{"JWT_SECRET", "too-short", "JWT_SECRET must have at least 32 bytes, got 9"},
+		{"AUTH_CODE_SECRET", "too-short", "AUTH_CODE_SECRET must have at least 32 bytes, got 9"},
+		{"SMTP_ADDR", "mailpit", "SMTP_ADDR must look like host:port"},
 		{"ACCESS_TOKEN_TTL", "soon", "ACCESS_TOKEN_TTL must be a duration"},
 		{"REFRESH_TOKEN_TTL", "0s", "REFRESH_TOKEN_TTL must be positive"},
 		{"REFRESH_TOKEN_TTL", "10m", "REFRESH_TOKEN_TTL must be longer than ACCESS_TOKEN_TTL"},

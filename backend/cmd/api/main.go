@@ -20,6 +20,7 @@ import (
 
 	"github.com/Kalki767/AddisHiwot/backend/internal/api"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/argon2id"
+	authemail "github.com/Kalki767/AddisHiwot/backend/internal/auth/email"
 	authhttp "github.com/Kalki767/AddisHiwot/backend/internal/auth/http"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/jwttoken"
 	authpostgres "github.com/Kalki767/AddisHiwot/backend/internal/auth/postgres"
@@ -28,6 +29,8 @@ import (
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/database"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/health"
 	"github.com/Kalki767/AddisHiwot/backend/internal/platform/httpx"
+	"github.com/Kalki767/AddisHiwot/backend/internal/platform/mail"
+	"github.com/Kalki767/AddisHiwot/backend/internal/platform/ratelimit"
 	usershttp "github.com/Kalki767/AddisHiwot/backend/internal/users/http"
 	userspostgres "github.com/Kalki767/AddisHiwot/backend/internal/users/postgres"
 	usersusecase "github.com/Kalki767/AddisHiwot/backend/internal/users/usecase"
@@ -67,19 +70,32 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	sender, err := mail.NewSMTP(cfg.SMTPAddr, cfg.MailFrom)
+	if err != nil {
+		return err
+	}
 	usersRepo := userspostgres.NewRepository(pool)
 	authService, err := authusecase.NewService(authusecase.Deps{
 		Users:      usersRepo,
 		Sessions:   authpostgres.NewSessions(pool),
+		Codes:      authpostgres.NewCodes(pool),
 		Hasher:     argon2id.New(argon2id.OWASPMinimum),
 		Tokens:     tokens,
+		Notifier:   authemail.New(sender),
+		CodeSecret: cfg.AuthCodeSecret,
 		Now:        time.Now,
 		RefreshTTL: cfg.RefreshTokenTTL,
+		Logger:     logger,
 	})
 	if err != nil {
 		return err
 	}
-	authHandler := authhttp.New(authService, logger)
+	authHandler := authhttp.New(authService, logger, authhttp.Limits{
+		// Each IP: bursts of 20, then 20 a minute, across all auth routes.
+		PerIP: ratelimit.New(20, 3*time.Second, time.Now),
+		// Each email or username: bursts of 5, then 1 a minute.
+		PerAccount: ratelimit.New(5, time.Minute, time.Now),
+	})
 
 	checker := health.New(pool, 2*time.Second, logger)
 	srv := httpx.NewServer(api.NewRouter(api.Deps{

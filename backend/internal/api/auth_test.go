@@ -40,8 +40,35 @@ func (c *testClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// mailbox stands in for email: it keeps the codes that would have been sent.
+type mailbox struct {
+	mu    sync.Mutex
+	codes map[string]string // email → last code
+}
+
+func (m *mailbox) VerificationCode(_ context.Context, to, _, _, code string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.codes[strings.ToLower(to)] = code
+	return nil
+}
+
+func (m *mailbox) SignupAttempt(context.Context, string, string, string) error { return nil }
+
+func (m *mailbox) code(email string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.codes[strings.ToLower(email)]
+}
+
+type allowAll struct{}
+
+func (allowAll) Allow(string) (bool, time.Duration) { return true, 0 }
+
+var testMailbox *mailbox // set by newServer for the test that runs it
+
 // Everything real (router, use cases, Argon2id, JWT, PostgreSQL) except a
-// cheaper hash cost and a movable clock.
+// cheaper hash cost, a movable clock, no rate limits and a mailbox instead of SMTP.
 func newServer(t *testing.T) (http.Handler, *pgxpool.Pool, *testClock) {
 	t.Helper()
 	pool := testdb.New(t)
@@ -51,19 +78,24 @@ func newServer(t *testing.T) (http.Handler, *pgxpool.Pool, *testClock) {
 		t.Fatal(err)
 	}
 	usersRepo := userspostgres.NewRepository(pool)
+	logger := slog.New(slog.DiscardHandler)
+	testMailbox = &mailbox{codes: map[string]string{}}
 	svc, err := authusecase.NewService(authusecase.Deps{
 		Users:      usersRepo,
 		Sessions:   authpostgres.NewSessions(pool),
+		Codes:      authpostgres.NewCodes(pool),
 		Hasher:     argon2id.New(argon2id.Params{MemoryKiB: 64, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}),
 		Tokens:     tokens,
+		Notifier:   testMailbox,
+		CodeSecret: []byte("end-to-end-code-secret-32-bytes-long"),
 		Now:        clock.Now,
 		RefreshTTL: 30 * 24 * time.Hour,
+		Logger:     logger,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	logger := slog.New(slog.DiscardHandler)
-	auth := authhttp.New(svc, logger)
+	auth := authhttp.New(svc, logger, authhttp.Limits{PerIP: allowAll{}, PerAccount: allowAll{}})
 	return api.NewRouter(api.Deps{
 		Logger: logger,
 		Health: health.New(pool, time.Second, logger),
@@ -269,4 +301,49 @@ func TestSessionsEndToEnd(t *testing.T) {
 	if rec := refresh(h, fourth.RefreshToken); rec.Code != http.StatusOK {
 		t.Errorf("refresh after access expiry: %d %s", rec.Code, rec.Body)
 	}
+}
+
+// Plan check: the verify flow end to end, through PostgreSQL.
+func TestEmailVerificationEndToEnd(t *testing.T) {
+	h, _, clock := newServer(t)
+	if rec := post(h, "/v1/auth/signup", signupJSON("KidistA", "kidist@example.com")); rec.Code != http.StatusAccepted {
+		t.Fatalf("signup: %d %s", rec.Code, rec.Body)
+	}
+	login := tokensFrom(t, post(h, "/v1/auth/login", `{"identifier":"kidista","password":"correct horse battery"}`))
+	if rec := me(h, login.AccessToken); !strings.Contains(rec.Body.String(), `"email_verified":false`) {
+		t.Fatalf("before verifying: %s", rec.Body)
+	}
+
+	code := testMailbox.code("kidist@example.com")
+	if len(code) != 5 {
+		t.Fatalf("no 5-digit code was sent: %q", code)
+	}
+	wrong := post(h, "/v1/auth/verify-email", `{"email":"kidist@example.com","code":"`+otherCode(code)+`"}`)
+	unknown := post(h, "/v1/auth/verify-email", `{"email":"nobody@example.com","code":"12345"}`)
+	if wrong.Code != http.StatusBadRequest || withoutRequestID(t, wrong.Body.String()) != withoutRequestID(t, unknown.Body.String()) {
+		t.Errorf("a wrong code and an unknown email must look the same:\n%s\n%s", wrong.Body, unknown.Body)
+	}
+
+	verified := post(h, "/v1/auth/verify-email", `{"email":"KIDIST@example.com","code":"`+code+`"}`)
+	if verified.Code != http.StatusOK {
+		t.Fatalf("verify: %d %s", verified.Code, verified.Body)
+	}
+	if rec := me(h, tokensFrom(t, verified).AccessToken); !strings.Contains(rec.Body.String(), `"email_verified":true`) {
+		t.Errorf("after verifying: %s", rec.Body)
+	}
+
+	// Resend answers like sign-up, for a known address and for nobody.
+	clock.Advance(time.Minute)
+	a := post(h, "/v1/auth/resend-code", `{"email":"kidist@example.com"}`)
+	b := post(h, "/v1/auth/resend-code", `{"email":"nobody@example.com"}`)
+	if a.Code != http.StatusAccepted || a.Body.String() != b.Body.String() {
+		t.Errorf("resend answers differ: %d %s / %d %s", a.Code, a.Body, b.Code, b.Body)
+	}
+}
+
+func otherCode(code string) string {
+	if code == "00000" {
+		return "11111"
+	}
+	return "00000"
 }

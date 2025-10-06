@@ -52,10 +52,46 @@ func (f *fakeService) Authenticate(tok string) (authdomain.Principal, error) {
 	return f.principal, f.err
 }
 
+func (f *fakeService) VerifyEmail(_ context.Context, email, code string) (usecase.LoginResult, error) {
+	f.gotToken = email + "/" + code
+	return usecase.LoginResult{User: f.user, Tokens: f.tokens}, f.err
+}
+
+func (f *fakeService) ResendVerification(_ context.Context, email string) error {
+	f.gotToken = email
+	return f.err
+}
+
+// allowAll is a limiter that never limits.
+type allowAll struct{}
+
+func (allowAll) Allow(string) (bool, time.Duration) { return true, 0 }
+
+// allowN allows n requests per key, then asks to wait.
+type allowN struct {
+	n    int
+	seen map[string]int
+}
+
+func (a *allowN) Allow(key string) (bool, time.Duration) {
+	if a.seen == nil {
+		a.seen = map[string]int{}
+	}
+	a.seen[key]++
+	return a.seen[key] <= a.n, 42 * time.Second
+}
+
+var noLimits = Limits{PerIP: allowAll{}, PerAccount: allowAll{}}
+
 func call(t *testing.T, svc Service, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return callWith(t, svc, noLimits, path, body)
+}
+
+func callWith(t *testing.T, svc Service, limits Limits, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	mux := http.NewServeMux()
-	New(svc, slog.New(slog.DiscardHandler)).Register(mux)
+	New(svc, slog.New(slog.DiscardHandler), limits).Register(mux)
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -183,7 +219,7 @@ func TestLogoutIs204(t *testing.T) {
 func protected(t *testing.T, svc *fakeService, authorization string) (*httptest.ResponseRecorder, *authdomain.Principal) {
 	t.Helper()
 	var seen *authdomain.Principal
-	h := New(svc, slog.New(slog.DiscardHandler)).RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := New(svc, slog.New(slog.DiscardHandler), noLimits).RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p, ok := authdomain.PrincipalFrom(r.Context())
 		if ok {
 			seen = &p
@@ -237,5 +273,58 @@ func TestRequireAuthRejections(t *testing.T) {
 				t.Errorf("WWW-Authenticate = %q", rec.Header().Get("WWW-Authenticate"))
 			}
 		})
+	}
+}
+
+func TestVerifyEmail(t *testing.T) {
+	svc := &fakeService{user: usersdomain.User{ID: uuid.New(), Username: "kidista"}, tokens: someTokens}
+	rec := call(t, svc, "/v1/auth/verify-email", `{"email":"kidist@example.com","code":"04217"}`)
+	if rec.Code != http.StatusOK || svc.gotToken != "kidist@example.com/04217" ||
+		!strings.Contains(rec.Body.String(), `"access_token":"acc"`) || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("got %d %s (input %q)", rec.Code, rec.Body, svc.gotToken)
+	}
+}
+
+func TestVerifyEmailWithAWrongCode(t *testing.T) {
+	rec := call(t, &fakeService{err: authdomain.ErrInvalidCode}, "/v1/auth/verify-email", `{"email":"k@example.com","code":"11111"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), CodeInvalidCode) {
+		t.Errorf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Resend must look exactly like sign-up, whoever asks.
+func TestResendCodeAnswersLikeSignup(t *testing.T) {
+	resend := call(t, &fakeService{}, "/v1/auth/resend-code", `{"email":"anyone@example.com"}`)
+	signup := call(t, &fakeService{outcome: usecase.Created}, "/v1/auth/signup", signupBody)
+	if resend.Code != http.StatusAccepted || resend.Body.String() != signup.Body.String() {
+		t.Errorf("resend %d %s vs signup %d %s", resend.Code, resend.Body, signup.Code, signup.Body)
+	}
+}
+
+// Plan check: a limited request gets 429 with a Retry-After header.
+func TestPerAccountLimitAnswers429(t *testing.T) {
+	limits := Limits{PerIP: allowAll{}, PerAccount: &allowN{n: 2}}
+	svc := &fakeService{err: authdomain.ErrInvalidCredentials}
+	body := `{"identifier":"KidistA","password":"guess"}`
+	for range 2 {
+		if rec := callWith(t, svc, limits, "/v1/auth/login", body); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("allowed attempt: %d", rec.Code)
+		}
+	}
+	// Same account in other letters: still the same limit.
+	rec := callWith(t, svc, limits, "/v1/auth/login", `{"identifier":"kidista","password":"guess"}`)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "42" ||
+		!strings.Contains(rec.Body.String(), "RATE_LIMITED") {
+		t.Errorf("3rd attempt: %d %q %s", rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+	}
+}
+
+func TestPerIPLimitCoversEveryAuthRoute(t *testing.T) {
+	for _, path := range []string{"/v1/auth/signup", "/v1/auth/login", "/v1/auth/refresh", "/v1/auth/logout",
+		"/v1/auth/verify-email", "/v1/auth/resend-code"} {
+		limits := Limits{PerIP: &allowN{n: 0}, PerAccount: allowAll{}}
+		if rec := callWith(t, &fakeService{}, limits, path, `{}`); rec.Code != http.StatusTooManyRequests {
+			t.Errorf("%s: %d, want 429", path, rec.Code)
+		}
 	}
 }

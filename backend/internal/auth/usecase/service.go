@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -30,10 +31,14 @@ var usernamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]{2,19}$`)
 type Deps struct {
 	Users      usersdomain.Repository
 	Sessions   authdomain.SessionRepository
+	Codes      authdomain.CodeRepository
 	Hasher     authdomain.PasswordHasher
 	Tokens     authdomain.AccessTokens
+	Notifier   authdomain.Notifier
+	CodeSecret []byte // keys the HMAC of email codes; at least 32 bytes
 	Now        func() time.Time
 	RefreshTTL time.Duration // how long a refresh token can be used
+	Logger     *slog.Logger  // email failures are logged, never shown to the client
 }
 
 // Service signs people up, logs them in and manages their sessions.
@@ -46,8 +51,12 @@ type Service struct {
 // that do not exist are checked against it, so a failed login takes as long
 // whether or not the account exists.
 func NewService(d Deps) (*Service, error) {
-	if d.Users == nil || d.Sessions == nil || d.Hasher == nil || d.Tokens == nil || d.Now == nil || d.RefreshTTL <= 0 {
+	if d.Users == nil || d.Sessions == nil || d.Codes == nil || d.Hasher == nil || d.Tokens == nil ||
+		d.Notifier == nil || d.Now == nil || d.Logger == nil || d.RefreshTTL <= 0 {
 		return nil, errors.New("auth: every dependency is required")
+	}
+	if len(d.CodeSecret) < 32 {
+		return nil, errors.New("auth: the code secret needs at least 32 bytes")
 	}
 	random := make([]byte, 32)
 	_, _ = rand.Read(random)
@@ -122,7 +131,7 @@ func (s *Service) Signup(ctx context.Context, in SignupInput) (SignupOutcome, er
 	}
 	now := s.Now().UTC()
 	terms := authdomain.TermsVersion
-	_, err = s.Users.Create(ctx, usersdomain.NewUser{
+	user, err := s.Users.Create(ctx, usersdomain.NewUser{
 		Email:            in.Email,
 		Username:         in.Username,
 		PasswordHash:     &hash,
@@ -135,8 +144,10 @@ func (s *Service) Signup(ctx context.Context, in SignupInput) (SignupOutcome, er
 	})
 	switch {
 	case err == nil:
+		s.sendCode(ctx, user, authdomain.PurposeVerifyEmail)
 		return Created, nil
 	case errors.Is(err, usersdomain.ErrEmailTaken):
+		s.notifyOwner(ctx, in.Email)
 		return EmailAlreadyRegistered, nil
 	case errors.Is(err, usersdomain.ErrUsernameTaken):
 		return 0, validate.Errors{{Field: "username", Code: "username_taken", Message: "is already taken"}}
@@ -305,4 +316,114 @@ func (s *Service) Authenticate(accessToken string) (authdomain.Principal, error)
 		return authdomain.Principal{}, err
 	}
 	return authdomain.Principal{UserID: c.UserID, SessionID: c.SessionID}, nil
+}
+
+// sendCode issues a code and emails it, within MaxCodesPerHour. Failures are
+// logged, not returned: the account exists either way, the person can ask for
+// another code, and the answer to the client must not change.
+func (s *Service) sendCode(ctx context.Context, u usersdomain.User, purpose authdomain.CodePurpose) {
+	if err := s.issueAndEmail(ctx, u, purpose); err != nil {
+		level := slog.LevelError
+		if errors.Is(err, authdomain.ErrTooManyCodes) {
+			level = slog.LevelInfo
+		}
+		s.Logger.Log(ctx, level, "email code not sent", slog.String("purpose", string(purpose)),
+			slog.String("user_id", u.ID.String()), slog.Any("error", err))
+	}
+}
+
+func (s *Service) issueAndEmail(ctx context.Context, u usersdomain.User, purpose authdomain.CodePurpose) error {
+	now := s.Now()
+	sent, err := s.Codes.CountSince(ctx, u.ID, purpose, now.Add(-time.Hour))
+	if err != nil {
+		return err
+	}
+	if sent >= authdomain.MaxCodesPerHour {
+		return authdomain.ErrTooManyCodes
+	}
+	code := authdomain.NewCode()
+	hash := authdomain.HashCode(s.CodeSecret, purpose, u.ID, code)
+	if err := s.Codes.Issue(ctx, u.ID, purpose, hash, now, now.Add(authdomain.CodeTTL)); err != nil {
+		return err
+	}
+	return s.Notifier.VerificationCode(ctx, u.Email, u.DisplayName, u.Locale, code)
+}
+
+// notifyOwner tells an account owner that someone tried to sign up with their
+// email; failures are only logged.
+func (s *Service) notifyOwner(ctx context.Context, email string) {
+	owner, err := s.Users.GetByEmail(ctx, email)
+	if err == nil {
+		err = s.Notifier.SignupAttempt(ctx, owner.Email, owner.DisplayName, owner.Locale)
+	}
+	if err != nil {
+		s.Logger.ErrorContext(ctx, "sign-up notice not sent", slog.Any("error", err))
+	}
+}
+
+// ResendVerification emails a new code to an unverified account. It always
+// returns nil for an unknown email, a verified account or the hourly limit, so
+// the endpoint answers the same for everyone.
+func (s *Service) ResendVerification(ctx context.Context, email string) error {
+	u, err := s.Users.GetByEmail(ctx, strings.TrimSpace(email))
+	if errors.Is(err, usersdomain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if u.EmailVerifiedAt == nil {
+		s.sendCode(ctx, u, authdomain.PurposeVerifyEmail)
+	}
+	return nil
+}
+
+var codePattern = regexp.MustCompile(`^[0-9]{5}$`)
+
+// VerifyEmail checks a code sent to email. On success the email is marked
+// verified and a session starts, so the person is logged in. Every failure that
+// depends on the account (unknown email, no code, wrong, expired or used-up
+// code) returns authdomain.ErrInvalidCode.
+func (s *Service) VerifyEmail(ctx context.Context, email, code string) (LoginResult, error) {
+	code = strings.TrimSpace(code)
+	var v validate.Validator
+	v.Check(codePattern.MatchString(code), "code", "invalid_format", "must be 5 digits")
+	if err := v.Err(); err != nil {
+		return LoginResult{}, err
+	}
+	u, err := s.Users.GetByEmail(ctx, strings.TrimSpace(email))
+	if errors.Is(err, usersdomain.ErrNotFound) {
+		return LoginResult{}, authdomain.ErrInvalidCode
+	}
+	if err != nil {
+		return LoginResult{}, err
+	}
+	now := s.Now()
+	attempt, err := s.Codes.UseAttempt(ctx, u.ID, authdomain.PurposeVerifyEmail, now, authdomain.MaxCodeAttempts)
+	if errors.Is(err, authdomain.ErrNoLiveCode) {
+		return LoginResult{}, authdomain.ErrInvalidCode
+	}
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if !authdomain.CodeMatches(s.CodeSecret, authdomain.PurposeVerifyEmail, u.ID, code, attempt.Hash) {
+		return LoginResult{}, authdomain.ErrInvalidCode
+	}
+	if err := s.Codes.Consume(ctx, attempt.ID, now); err != nil {
+		if errors.Is(err, authdomain.ErrCodeAlreadyUsed) {
+			return LoginResult{}, authdomain.ErrInvalidCode
+		}
+		return LoginResult{}, err
+	}
+	if err := s.Users.MarkEmailVerified(ctx, u.ID, now); err != nil {
+		return LoginResult{}, err
+	}
+	if u.EmailVerifiedAt == nil {
+		u.EmailVerifiedAt = &now
+	}
+	tokens, err := s.startSession(ctx, u.ID)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{User: u, Tokens: tokens}, nil
 }

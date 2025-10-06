@@ -23,6 +23,7 @@ const (
 	CodeUnauthenticated     = "UNAUTHENTICATED"       // no access token sent
 	CodeTokenExpired        = "TOKEN_EXPIRED"         // refresh, then retry
 	CodeInvalidToken        = "INVALID_TOKEN"         // malformed, forged or not ours
+	CodeInvalidCode         = "INVALID_CODE"          // wrong, expired or used-up email code
 )
 
 // Service is what the handlers need from the use case layer.
@@ -32,23 +33,53 @@ type Service interface {
 	Refresh(ctx context.Context, refreshToken string) (usecase.Tokens, error)
 	Logout(ctx context.Context, refreshToken string) error
 	Authenticate(accessToken string) (authdomain.Principal, error)
+	VerifyEmail(ctx context.Context, email, code string) (usecase.LoginResult, error)
+	ResendVerification(ctx context.Context, email string) error
+}
+
+// Limits are the rate limiters of the auth routes.
+type Limits struct {
+	// PerIP applies to every auth route, keyed by the client IP.
+	PerIP httpx.Allower
+	// PerAccount applies to sign-up, login, verify and resend, keyed by the email
+	// or username, so guessing from many IPs still hits one limit.
+	PerAccount httpx.Allower
 }
 
 // Handler serves /v1/auth/*.
 type Handler struct {
 	svc    Service
 	logger *slog.Logger
+	limits Limits
 }
 
 // New returns the auth handlers.
-func New(svc Service, logger *slog.Logger) *Handler { return &Handler{svc: svc, logger: logger} }
+func New(svc Service, logger *slog.Logger, limits Limits) *Handler {
+	return &Handler{svc: svc, logger: logger, limits: limits}
+}
 
-// Register adds the routes to mux.
+// Register adds the routes to mux, each behind the per-IP limit.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc("POST /v1/auth/signup", h.signup)
-	mux.HandleFunc("POST /v1/auth/login", h.login)
-	mux.HandleFunc("POST /v1/auth/refresh", h.refresh)
-	mux.HandleFunc("POST /v1/auth/logout", h.logout)
+	for pattern, fn := range map[string]http.HandlerFunc{
+		"POST /v1/auth/signup":       h.signup,
+		"POST /v1/auth/login":        h.login,
+		"POST /v1/auth/refresh":      h.refresh,
+		"POST /v1/auth/logout":       h.logout,
+		"POST /v1/auth/verify-email": h.verifyEmail,
+		"POST /v1/auth/resend-code":  h.resendCode,
+	} {
+		mux.Handle(pattern, httpx.LimitByIP(h.limits.PerIP, h.logger, fn))
+	}
+}
+
+// allowAccount applies the per-account limit; on refusal it has answered 429.
+func (h *Handler) allowAccount(w http.ResponseWriter, r *http.Request, account string) bool {
+	key := "account:" + strings.ToLower(strings.TrimSpace(account))
+	if ok, wait := h.limits.PerAccount.Allow(key); !ok {
+		httpx.WriteTooManyRequests(w, r, h.logger, wait)
+		return false
+	}
+	return true
 }
 
 type signupRequest struct {
@@ -74,8 +105,11 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, r, h.logger, err)
 		return
 	}
+	if !h.allowAccount(w, r, req.Email) {
+		return
+	}
 	// The outcome (created or already registered) only decides which email is
-	// sent, from Day 10 on; the client gets the same answer either way.
+	// sent; the client gets the same answer either way.
 	_, err := h.svc.Signup(r.Context(), usecase.SignupInput{
 		Username: req.Username, Email: req.Email, Password: req.Password,
 		IsAdult: req.IsAdult, AcceptTerms: req.AcceptTerms, Locale: req.Locale,
@@ -115,6 +149,9 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := httpx.DecodeJSON(w, r, &req); err != nil {
 		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	if !h.allowAccount(w, r, req.Identifier) {
 		return
 	}
 	res, err := h.svc.Login(r.Context(), req.Identifier, req.Password)
@@ -172,6 +209,57 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type verifyRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+func (h *Handler) verifyEmail(w http.ResponseWriter, r *http.Request) {
+	var req verifyRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	if !h.allowAccount(w, r, req.Email) {
+		return
+	}
+	res, err := h.svc.VerifyEmail(r.Context(), req.Email, req.Code)
+	if errors.Is(err, authdomain.ErrInvalidCode) {
+		httpx.WriteError(w, r, h.logger, httpx.NewError(http.StatusBadRequest, CodeInvalidCode,
+			"The code is not right or has expired. Check the newest email or ask for a new code."))
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	writeTokens(w, struct {
+		User   usershttp.User `json:"user"`
+		Tokens tokensJSON     `json:"tokens"`
+	}{User: usershttp.ToJSON(res.User), Tokens: toTokensJSON(res.Tokens)})
+}
+
+type resendRequest struct {
+	Email string `json:"email"`
+}
+
+// resendCode answers like sign-up whatever happened, so it reveals nothing.
+func (h *Handler) resendCode(w http.ResponseWriter, r *http.Request) {
+	var req resendRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	if !h.allowAccount(w, r, req.Email) {
+		return
+	}
+	if err := h.svc.ResendVerification(r.Context(), req.Email); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, signupAccepted)
 }
 
 // RequireAuth lets a request through only with a valid access token in

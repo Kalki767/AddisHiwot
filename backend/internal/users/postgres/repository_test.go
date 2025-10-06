@@ -176,3 +176,25 @@ func TestDisplayNameLimitCountsLettersNotBytes(t *testing.T) {
 		t.Errorf("50 Amharic letters rejected: %v", err)
 	}
 }
+
+func TestMarkEmailVerifiedKeepsTheFirstTime(t *testing.T) {
+	repo := postgres.NewRepository(testdb.New(t))
+	ctx := context.Background()
+	u, err := repo.Create(ctx, newUser("v@example.com", "verifier"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.EmailVerifiedAt != nil {
+		t.Fatal("a new account must not be verified")
+	}
+	first := time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC)
+	for _, at := range []time.Time{first, first.Add(time.Hour)} {
+		if err := repo.MarkEmailVerified(ctx, u.ID, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := repo.GetByID(ctx, u.ID)
+	if got.EmailVerifiedAt == nil || !got.EmailVerifiedAt.Equal(first) {
+		t.Errorf("EmailVerifiedAt = %v, want the first time %v", got.EmailVerifiedAt, first)
+	}
+}

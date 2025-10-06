@@ -31,9 +31,12 @@ type Config struct {
 	JWTSecret       []byte        // JWT_SECRET: signs access tokens; at least 32 bytes
 	AccessTokenTTL  time.Duration // ACCESS_TOKEN_TTL: access token lifetime (default 15m)
 	RefreshTokenTTL time.Duration // REFRESH_TOKEN_TTL: refresh token lifetime (default 720h = 30 days)
+	AuthCodeSecret  []byte        // AUTH_CODE_SECRET: keys the HMAC of email codes; at least 32 bytes
+	SMTPAddr        string        // SMTP_ADDR: host:port of the mail server (Mailpit in development)
+	MailFrom        string        // MAIL_FROM: sender, e.g. "Addis Hiwot <no-reply@addishiwot.test>"
 }
 
-// MinJWTSecretBytes is the shortest accepted JWT_SECRET (256 bits).
+// MinJWTSecretBytes is the shortest accepted JWT_SECRET or AUTH_CODE_SECRET (256 bits).
 const MinJWTSecretBytes = 32
 
 // Load reads the settings through getenv (os.Getenv in production, a map in tests).
@@ -54,14 +57,24 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	cfg := Config{
-		Env:         required("APP_ENV"),
-		HTTPAddr:    required("HTTP_ADDR"),
-		DatabaseURL: required("DATABASE_URL"),
-		JWTSecret:   []byte(required("JWT_SECRET")),
+		Env:            required("APP_ENV"),
+		HTTPAddr:       required("HTTP_ADDR"),
+		DatabaseURL:    required("DATABASE_URL"),
+		JWTSecret:      []byte(required("JWT_SECRET")),
+		AuthCodeSecret: []byte(required("AUTH_CODE_SECRET")),
+		SMTPAddr:       required("SMTP_ADDR"),
+		MailFrom:       required("MAIL_FROM"),
 	}
-	// The secret is never echoed back, only its length.
-	if n := len(cfg.JWTSecret); n > 0 && n < MinJWTSecretBytes {
-		errs = append(errs, fmt.Errorf("JWT_SECRET must have at least %d bytes, got %d (generate one with: openssl rand -base64 48)", MinJWTSecretBytes, n))
+	// Secrets are never echoed back, only their length.
+	for key, secret := range map[string][]byte{"JWT_SECRET": cfg.JWTSecret, "AUTH_CODE_SECRET": cfg.AuthCodeSecret} {
+		if n := len(secret); n > 0 && n < MinJWTSecretBytes {
+			errs = append(errs, fmt.Errorf("%s must have at least %d bytes, got %d (generate one with: openssl rand -base64 48)", key, MinJWTSecretBytes, n))
+		}
+	}
+	if cfg.SMTPAddr != "" {
+		if _, _, err := net.SplitHostPort(cfg.SMTPAddr); err != nil {
+			errs = append(errs, fmt.Errorf("SMTP_ADDR must look like host:port, got %q", cfg.SMTPAddr))
+		}
 	}
 
 	if cfg.Env != "" && cfg.Env != EnvDevelopment && cfg.Env != EnvProduction {

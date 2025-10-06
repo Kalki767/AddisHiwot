@@ -147,8 +147,7 @@ func sessionService(t *testing.T) (*Service, *fakeSessions, *time.Time) {
 	t.Helper()
 	now := fixedNow
 	sessions := newFakeSessions()
-	svc, err := NewService(Deps{Users: newFakeUsers(), Sessions: sessions, Hasher: &fakeHasher{}, Tokens: fakeTokens{},
-		Now: func() time.Time { return now }, RefreshTTL: 30 * 24 * time.Hour})
+	svc, err := NewService(testDeps(newFakeUsers(), sessions, &fakeHasher{}, func() time.Time { return now }))
 	if err != nil {
 		t.Fatal(err)
 	}

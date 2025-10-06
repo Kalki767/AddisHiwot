@@ -35,6 +35,7 @@ type User struct {
 	AdultConfirmedAt *time.Time // when the person confirmed being 18 or older
 	TermsAcceptedAt  *time.Time // when they accepted TermsVersion
 	TermsVersion     *string
+	EmailVerifiedAt  *time.Time // nil until the email code was entered
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -62,4 +63,7 @@ type Repository interface {
 	GetByID(ctx context.Context, id uuid.UUID) (User, error)
 	GetByEmail(ctx context.Context, email string) (User, error)
 	GetByUsername(ctx context.Context, username string) (User, error)
+	// MarkEmailVerified records the first time the email was verified; calling it
+	// again keeps that time.
+	MarkEmailVerified(ctx context.Context, id uuid.UUID, at time.Time) error
 }

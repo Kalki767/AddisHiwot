@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -74,6 +75,14 @@ func (r *Repository) GetByUsername(ctx context.Context, username string) (domain
 	return toDomain(row), nil
 }
 
+// MarkEmailVerified records the first verification time.
+func (r *Repository) MarkEmailVerified(ctx context.Context, id uuid.UUID, at time.Time) error {
+	if err := r.q.MarkEmailVerified(ctx, db.MarkEmailVerifiedParams{ID: id, VerifiedAt: &at}); err != nil {
+		return fmt.Errorf("users: mark email verified: %w", err)
+	}
+	return nil
+}
+
 // PostgreSQL error codes (https://www.postgresql.org/docs/current/errcodes-appendix.html).
 const (
 	uniqueViolation = "23505"
@@ -112,6 +121,7 @@ func toDomain(r db.User) domain.User {
 		AdultConfirmedAt: r.AdultConfirmedAt,
 		TermsAcceptedAt:  r.TermsAcceptedAt,
 		TermsVersion:     r.TermsVersion,
+		EmailVerifiedAt:  r.EmailVerifiedAt,
 		CreatedAt:        r.CreatedAt,
 		UpdatedAt:        r.UpdatedAt,
 	}

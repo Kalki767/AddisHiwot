@@ -24,13 +24,16 @@ type User struct {
 	DisplayName string    `json:"display_name"`
 	Locale      string    `json:"locale"`
 	Timezone    string    `json:"timezone"`
-	CreatedAt   time.Time `json:"created_at"`
+	// EmailVerified is false until the email code was entered; the app then
+	// shows the code screen instead of Home.
+	EmailVerified bool      `json:"email_verified"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // ToJSON converts an account to its public shape.
 func ToJSON(u domain.User) User {
 	return User{ID: u.ID, Username: u.Username, Email: u.Email, DisplayName: u.DisplayName,
-		Locale: u.Locale, Timezone: u.Timezone, CreatedAt: u.CreatedAt}
+		Locale: u.Locale, Timezone: u.Timezone, EmailVerified: u.EmailVerifiedAt != nil, CreatedAt: u.CreatedAt}
 }
 
 // Service is what the handlers need from the users use cases.
