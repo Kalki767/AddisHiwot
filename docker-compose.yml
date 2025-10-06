@@ -92,6 +92,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-15m}
       REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-720h}
+      AUTH_CODE_SECRET: ${AUTH_CODE_SECRET:?set AUTH_CODE_SECRET in .env}
+      MAIL_FROM: ${MAIL_FROM:?set MAIL_FROM in .env}
+      SMTP_ADDR: "mailpit:1025"
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8080}:8080"
     depends_on:
@@ -99,6 +102,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_healthy
     # Longer than SHUTDOWN_TIMEOUT (15s) so requests in flight can finish before Docker kills the process.
     stop_grace_period: 20s
     restart: unless-stopped
