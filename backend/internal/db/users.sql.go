@@ -17,7 +17,7 @@ INSERT INTO users (email, username, password_hash, display_name, locale, timezon
                    adult_confirmed_at, terms_accepted_at, terms_version)
 VALUES ($1, $2, $3, $4, $5, $6,
         $7, $8, $9)
-RETURNING id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version
+RETURNING id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version, email_verified_at
 `
 
 type CreateUserParams struct {
@@ -58,12 +58,13 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.AdultConfirmedAt,
 		&i.TermsAcceptedAt,
 		&i.TermsVersion,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version FROM users WHERE email = $1
+SELECT id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version, email_verified_at FROM users WHERE email = $1
 `
 
 // email is citext, so this match ignores case.
@@ -83,12 +84,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.AdultConfirmedAt,
 		&i.TermsAcceptedAt,
 		&i.TermsVersion,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version FROM users WHERE id = $1
+SELECT id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version, email_verified_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
@@ -107,12 +109,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.AdultConfirmedAt,
 		&i.TermsAcceptedAt,
 		&i.TermsVersion,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version FROM users WHERE username = $1
+SELECT id, email, username, password_hash, display_name, locale, timezone, created_at, updated_at, adult_confirmed_at, terms_accepted_at, terms_version, email_verified_at FROM users WHERE username = $1
 `
 
 // username is citext, so this match ignores case.
@@ -132,6 +135,22 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 		&i.AdultConfirmedAt,
 		&i.TermsAcceptedAt,
 		&i.TermsVersion,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
+}
+
+const markEmailVerified = `-- name: MarkEmailVerified :exec
+UPDATE users SET email_verified_at = coalesce(email_verified_at, $1) WHERE id = $2
+`
+
+type MarkEmailVerifiedParams struct {
+	VerifiedAt *time.Time
+	ID         uuid.UUID
+}
+
+// Keeps the first verification time if it is called again.
+func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) error {
+	_, err := q.db.Exec(ctx, markEmailVerified, arg.VerifiedAt, arg.ID)
+	return err
 }

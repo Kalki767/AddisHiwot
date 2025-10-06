@@ -19,6 +19,17 @@ type AuthSession struct {
 	RevokedReason *string
 }
 
+type EmailCode struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	Purpose    string
+	CodeHash   []byte
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	Attempts   int32
+	ConsumedAt *time.Time
+}
+
 type RefreshToken struct {
 	ID         uuid.UUID
 	SessionID  uuid.UUID
@@ -42,4 +53,5 @@ type User struct {
 	AdultConfirmedAt *time.Time
 	TermsAcceptedAt  *time.Time
 	TermsVersion     *string
+	EmailVerifiedAt  *time.Time
 }

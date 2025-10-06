@@ -28,7 +28,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	if !strings.Contains(first, "table users") {
 		t.Fatalf("users table missing after up:\n%s", first)
 	}
-	assertVersion(t, m, 4)
+	assertVersion(t, m, 5)
 
 	if err := m.Up(); err != nil {
 		t.Fatalf("up with nothing to do must not fail: %v", err)

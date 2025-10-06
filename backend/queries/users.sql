@@ -15,3 +15,7 @@ SELECT * FROM users WHERE email = @email;
 -- name: GetUserByUsername :one
 -- username is citext, so this match ignores case.
 SELECT * FROM users WHERE username = @username;
+
+-- name: MarkEmailVerified :exec
+-- Keeps the first verification time if it is called again.
+UPDATE users SET email_verified_at = coalesce(email_verified_at, @verified_at) WHERE id = @id;
