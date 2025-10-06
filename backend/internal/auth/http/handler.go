@@ -179,8 +179,9 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 // request context (read it with authdomain.PrincipalFrom).
 func (h *Handler) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || strings.TrimSpace(token) == "" {
+		// The scheme name is case-insensitive (RFC 7235): "bearer" counts too.
+		scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(token) == "" {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="addishiwot"`)
 			httpx.WriteError(w, r, h.logger, httpx.NewError(http.StatusUnauthorized, CodeUnauthenticated, "Log in to continue."))
 			return

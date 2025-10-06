@@ -202,9 +202,11 @@ func protected(t *testing.T, svc *fakeService, authorization string) (*httptest.
 func TestRequireAuthLetsAValidTokenThrough(t *testing.T) {
 	want := authdomain.Principal{UserID: uuid.New(), SessionID: uuid.New()}
 	svc := &fakeService{principal: want}
-	rec, seen := protected(t, svc, "Bearer good-token")
-	if rec.Code != http.StatusOK || seen == nil || *seen != want || svc.gotToken != "good-token" {
-		t.Errorf("got %d, principal %+v, token %q", rec.Code, seen, svc.gotToken)
+	for _, header := range []string{"Bearer good-token", "bearer good-token", "BEARER good-token"} {
+		rec, seen := protected(t, svc, header)
+		if rec.Code != http.StatusOK || seen == nil || *seen != want || svc.gotToken != "good-token" {
+			t.Errorf("%q: got %d, principal %+v, token %q", header, rec.Code, seen, svc.gotToken)
+		}
 	}
 }
 
@@ -217,6 +219,8 @@ func TestRequireAuthRejections(t *testing.T) {
 		{"no header", "", nil, CodeUnauthenticated},
 		{"basic auth", "Basic a2lkaXN0OnB3", nil, CodeUnauthenticated},
 		{"empty bearer", "Bearer ", nil, CodeUnauthenticated},
+		{"scheme only", "Bearer", nil, CodeUnauthenticated},
+		{"bearer look-alike", "Bearerx abc", nil, CodeUnauthenticated},
 		{"expired", "Bearer old", authdomain.ErrTokenExpired, CodeTokenExpired},
 		{"forged", "Bearer forged", authdomain.ErrInvalidToken, CodeInvalidToken},
 	}
