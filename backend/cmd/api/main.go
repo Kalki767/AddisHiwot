@@ -76,16 +76,17 @@ func run(ctx context.Context) error {
 	}
 	usersRepo := userspostgres.NewRepository(pool)
 	authService, err := authusecase.NewService(authusecase.Deps{
-		Users:      usersRepo,
-		Sessions:   authpostgres.NewSessions(pool),
-		Codes:      authpostgres.NewCodes(pool),
-		Hasher:     argon2id.New(argon2id.OWASPMinimum),
-		Tokens:     tokens,
-		Notifier:   authemail.New(sender),
-		CodeSecret: cfg.AuthCodeSecret,
-		Now:        time.Now,
-		RefreshTTL: cfg.RefreshTokenTTL,
-		Logger:     logger,
+		Users:       usersRepo,
+		Sessions:    authpostgres.NewSessions(pool),
+		Codes:       authpostgres.NewCodes(pool),
+		ResetTokens: authpostgres.NewResetTokens(pool),
+		Hasher:      argon2id.New(argon2id.OWASPMinimum),
+		Tokens:      tokens,
+		Notifier:    authemail.New(sender),
+		CodeSecret:  cfg.AuthCodeSecret,
+		Now:         time.Now,
+		RefreshTTL:  cfg.RefreshTokenTTL,
+		Logger:      logger,
 	})
 	if err != nil {
 		return err

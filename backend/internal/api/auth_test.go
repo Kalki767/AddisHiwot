@@ -42,14 +42,22 @@ func (c *testClock) Advance(d time.Duration) {
 
 // mailbox stands in for email: it keeps the codes that would have been sent.
 type mailbox struct {
-	mu    sync.Mutex
-	codes map[string]string // email → last code
+	mu         sync.Mutex
+	codes      map[string]string // email → last verification code
+	resetCodes map[string]string // email → last password-reset code
 }
 
 func (m *mailbox) VerificationCode(_ context.Context, to, _, _, code string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.codes[strings.ToLower(to)] = code
+	return nil
+}
+
+func (m *mailbox) PasswordResetCode(_ context.Context, to, _, _, code string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resetCodes[strings.ToLower(to)] = code
 	return nil
 }
 
@@ -79,18 +87,19 @@ func newServer(t *testing.T) (http.Handler, *pgxpool.Pool, *testClock) {
 	}
 	usersRepo := userspostgres.NewRepository(pool)
 	logger := slog.New(slog.DiscardHandler)
-	testMailbox = &mailbox{codes: map[string]string{}}
+	testMailbox = &mailbox{codes: map[string]string{}, resetCodes: map[string]string{}}
 	svc, err := authusecase.NewService(authusecase.Deps{
-		Users:      usersRepo,
-		Sessions:   authpostgres.NewSessions(pool),
-		Codes:      authpostgres.NewCodes(pool),
-		Hasher:     argon2id.New(argon2id.Params{MemoryKiB: 64, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}),
-		Tokens:     tokens,
-		Notifier:   testMailbox,
-		CodeSecret: []byte("end-to-end-code-secret-32-bytes-long"),
-		Now:        clock.Now,
-		RefreshTTL: 30 * 24 * time.Hour,
-		Logger:     logger,
+		Users:       usersRepo,
+		Sessions:    authpostgres.NewSessions(pool),
+		Codes:       authpostgres.NewCodes(pool),
+		ResetTokens: authpostgres.NewResetTokens(pool),
+		Hasher:      argon2id.New(argon2id.Params{MemoryKiB: 64, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}),
+		Tokens:      tokens,
+		Notifier:    testMailbox,
+		CodeSecret:  []byte("end-to-end-code-secret-32-bytes-long"),
+		Now:         clock.Now,
+		RefreshTTL:  30 * 24 * time.Hour,
+		Logger:      logger,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -346,4 +355,99 @@ func otherCode(code string) string {
 		return "11111"
 	}
 	return "00000"
+}
+
+func resetCode(t *testing.T, email string) string {
+	t.Helper()
+	testMailbox.mu.Lock()
+	defer testMailbox.mu.Unlock()
+	return testMailbox.resetCodes[strings.ToLower(email)]
+}
+
+// Plan check: the whole reset flow against real PostgreSQL.
+func TestPasswordResetEndToEnd(t *testing.T) {
+	h, pool, clock := newServer(t)
+	ctx := context.Background()
+	const email = "kidist@example.com"
+	if rec := post(h, "/v1/auth/signup", signupJSON("KidistA", email)); rec.Code != http.StatusAccepted {
+		t.Fatalf("signup: %d %s", rec.Code, rec.Body)
+	}
+	old := tokensFrom(t, post(h, "/v1/auth/login", `{"identifier":"kidista","password":"correct horse battery"}`))
+
+	// An unknown email must answer exactly like a known one.
+	known := post(h, "/v1/auth/password-reset/request", `{"email":"`+email+`"}`)
+	unknown := post(h, "/v1/auth/password-reset/request", `{"email":"nobody@example.com"}`)
+	if known.Code != http.StatusAccepted || known.Body.String() != unknown.Body.String() {
+		t.Fatalf("request answers differ: %d %s / %d %s", known.Code, known.Body, unknown.Code, unknown.Body)
+	}
+	code := resetCode(t, email)
+	if len(code) != 5 {
+		t.Fatalf("no reset code was sent: %q", code)
+	}
+
+	// Five wrong codes use the live code up, then the right one no longer works.
+	wrong := otherCode(code)
+	for range 5 {
+		if rec := post(h, "/v1/auth/password-reset/verify", `{"email":"`+email+`","code":"`+wrong+`"}`); rec.Code != http.StatusBadRequest {
+			t.Fatalf("wrong code: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if rec := post(h, "/v1/auth/password-reset/verify", `{"email":"`+email+`","code":"`+code+`"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("right code after 5 wrong ones: %d, want 400", rec.Code)
+	}
+
+	// A new code, this time entered correctly.
+	if rec := post(h, "/v1/auth/password-reset/request", `{"email":"`+email+`"}`); rec.Code != http.StatusAccepted {
+		t.Fatal(rec.Body)
+	}
+	verified := post(h, "/v1/auth/password-reset/verify", `{"email":"KIDIST@example.com","code":"`+resetCode(t, email)+`"}`)
+	if verified.Code != http.StatusOK {
+		t.Fatalf("verify: %d %s", verified.Code, verified.Body)
+	}
+	var grant struct {
+		ResetToken string `json:"reset_token"`
+	}
+	if err := json.Unmarshal(verified.Body.Bytes(), &grant); err != nil || grant.ResetToken == "" {
+		t.Fatalf("no reset token in %s", verified.Body)
+	}
+	body := func(password string) string {
+		return `{"reset_token":"` + grant.ResetToken + `","password":"` + password + `"}`
+	}
+
+	// The same password as before is refused, and the token survives that.
+	same := post(h, "/v1/auth/password-reset/complete", body("correct horse battery"))
+	if same.Code != http.StatusUnprocessableEntity || !strings.Contains(same.Body.String(), "same_as_current") {
+		t.Errorf("same password: %d %s", same.Code, same.Body)
+	}
+	if rec := post(h, "/v1/auth/password-reset/complete", body("a brand new passphrase")); rec.Code != http.StatusNoContent {
+		t.Fatalf("complete: %d %s", rec.Code, rec.Body)
+	}
+	// The token works once.
+	if rec := post(h, "/v1/auth/password-reset/complete", body("yet another passphrase")); rec.Code != http.StatusBadRequest {
+		t.Errorf("reusing the reset token: %d, want 400", rec.Code)
+	}
+
+	// Old sessions are gone, the new password works, the old one does not.
+	if rec := refresh(h, old.RefreshToken); rec.Code != http.StatusUnauthorized {
+		t.Errorf("session from before the reset: %d, want 401", rec.Code)
+	}
+	if rec := me(h, old.AccessToken); rec.Code != http.StatusOK {
+		t.Logf("note: the old access token still works until it expires (%d)", rec.Code)
+	}
+	if rec := post(h, "/v1/auth/login", `{"identifier":"kidista","password":"correct horse battery"}`); rec.Code != http.StatusUnauthorized {
+		t.Errorf("old password: %d, want 401", rec.Code)
+	}
+	fresh := post(h, "/v1/auth/login", `{"identifier":"kidista","password":"a brand new passphrase"}`)
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("new password: %d %s", fresh.Code, fresh.Body)
+	}
+	if rec := me(h, tokensFrom(t, fresh).AccessToken); !strings.Contains(rec.Body.String(), `"email_verified":true`) {
+		t.Errorf("a completed reset should also verify the email: %s", rec.Body)
+	}
+
+	var reason string
+	if err := pool.QueryRow(ctx, `SELECT revoked_reason FROM auth_sessions WHERE revoked_reason = 'password_reset' LIMIT 1`).Scan(&reason); err != nil {
+		t.Errorf("no session revoked with reason password_reset: %v", err)
+	}
+	clock.Advance(time.Minute)
 }

@@ -24,6 +24,7 @@ const (
 	CodeTokenExpired        = "TOKEN_EXPIRED"         // refresh, then retry
 	CodeInvalidToken        = "INVALID_TOKEN"         // malformed, forged or not ours
 	CodeInvalidCode         = "INVALID_CODE"          // wrong, expired or used-up email code
+	CodeInvalidResetToken   = "INVALID_RESET_TOKEN"   // reset token unknown, expired or already used
 )
 
 // Service is what the handlers need from the use case layer.
@@ -35,6 +36,9 @@ type Service interface {
 	Authenticate(accessToken string) (authdomain.Principal, error)
 	VerifyEmail(ctx context.Context, email, code string) (usecase.LoginResult, error)
 	ResendVerification(ctx context.Context, email string) error
+	RequestPasswordReset(ctx context.Context, email string) error
+	VerifyPasswordResetCode(ctx context.Context, email, code string) (usecase.ResetGrant, error)
+	CompletePasswordReset(ctx context.Context, token, newPassword string) error
 }
 
 // Limits are the rate limiters of the auth routes.
@@ -67,6 +71,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		"POST /v1/auth/logout":       h.logout,
 		"POST /v1/auth/verify-email": h.verifyEmail,
 		"POST /v1/auth/resend-code":  h.resendCode,
+
+		// Password reset: ask for a code, swap the code for a short-lived token,
+		// then set the new password with that token.
+		"POST /v1/auth/password-reset/request":  h.requestPasswordReset,
+		"POST /v1/auth/password-reset/verify":   h.verifyPasswordResetCode,
+		"POST /v1/auth/password-reset/complete": h.completePasswordReset,
 	} {
 		mux.Handle(pattern, httpx.LimitByIP(h.limits.PerIP, h.logger, fn))
 	}
@@ -260,6 +270,75 @@ func (h *Handler) resendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, signupAccepted)
+}
+
+// resetRequested is the one answer to a reset request, whether or not the email
+// has an account.
+var resetRequested = map[string]string{
+	"status":  "reset_code_sent",
+	"message": "If that email has an account, a 5-digit code is on its way.",
+}
+
+func (h *Handler) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req resendRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	if !h.allowAccount(w, r, req.Email) {
+		return
+	}
+	if err := h.svc.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, resetRequested)
+}
+
+func (h *Handler) verifyPasswordResetCode(w http.ResponseWriter, r *http.Request) {
+	var req verifyRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	if !h.allowAccount(w, r, req.Email) {
+		return
+	}
+	grant, err := h.svc.VerifyPasswordResetCode(r.Context(), req.Email, req.Code)
+	if errors.Is(err, authdomain.ErrInvalidCode) {
+		httpx.WriteError(w, r, h.logger, httpx.NewError(http.StatusBadRequest, CodeInvalidCode,
+			"The code is not right or has expired. Check the newest email or ask for a new code."))
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	writeTokens(w, map[string]any{"reset_token": grant.Token, "expires_at": grant.ExpiresAt})
+}
+
+type completeResetRequest struct {
+	ResetToken string `json:"reset_token"`
+	Password   string `json:"password"`
+}
+
+func (h *Handler) completePasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req completeResetRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	err := h.svc.CompletePasswordReset(r.Context(), req.ResetToken, req.Password)
+	if errors.Is(err, authdomain.ErrInvalidResetToken) {
+		httpx.WriteError(w, r, h.logger, httpx.NewError(http.StatusBadRequest, CodeInvalidResetToken,
+			"This reset link has expired or was already used. Ask for a new code."))
+		return
+	}
+	if err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // RequireAuth lets a request through only with a valid access token in

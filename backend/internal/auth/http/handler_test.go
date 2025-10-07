@@ -62,6 +62,21 @@ func (f *fakeService) ResendVerification(_ context.Context, email string) error 
 	return f.err
 }
 
+func (f *fakeService) RequestPasswordReset(_ context.Context, email string) error {
+	f.gotToken = email
+	return f.err
+}
+
+func (f *fakeService) VerifyPasswordResetCode(_ context.Context, email, code string) (usecase.ResetGrant, error) {
+	f.gotToken = email + "/" + code
+	return usecase.ResetGrant{Token: "reset-token", ExpiresAt: someTokens.AccessExpiresAt}, f.err
+}
+
+func (f *fakeService) CompletePasswordReset(_ context.Context, token, password string) error {
+	f.gotToken = token + "/" + password
+	return f.err
+}
+
 // allowAll is a limiter that never limits.
 type allowAll struct{}
 
@@ -321,10 +336,55 @@ func TestPerAccountLimitAnswers429(t *testing.T) {
 
 func TestPerIPLimitCoversEveryAuthRoute(t *testing.T) {
 	for _, path := range []string{"/v1/auth/signup", "/v1/auth/login", "/v1/auth/refresh", "/v1/auth/logout",
-		"/v1/auth/verify-email", "/v1/auth/resend-code"} {
+		"/v1/auth/verify-email", "/v1/auth/resend-code", "/v1/auth/password-reset/request",
+		"/v1/auth/password-reset/verify", "/v1/auth/password-reset/complete"} {
 		limits := Limits{PerIP: &allowN{n: 0}, PerAccount: allowAll{}}
 		if rec := callWith(t, &fakeService{}, limits, path, `{}`); rec.Code != http.StatusTooManyRequests {
 			t.Errorf("%s: %d, want 429", path, rec.Code)
 		}
+	}
+}
+
+func TestPasswordResetRequestAnswersTheSameForEveryone(t *testing.T) {
+	known := call(t, &fakeService{}, "/v1/auth/password-reset/request", `{"email":"kidist@example.com"}`)
+	unknown := call(t, &fakeService{}, "/v1/auth/password-reset/request", `{"email":"nobody@example.com"}`)
+	if known.Code != http.StatusAccepted || known.Body.String() != unknown.Body.String() {
+		t.Errorf("answers differ: %d %s / %d %s", known.Code, known.Body, unknown.Code, unknown.Body)
+	}
+}
+
+func TestPasswordResetVerifyReturnsAToken(t *testing.T) {
+	svc := &fakeService{}
+	rec := call(t, svc, "/v1/auth/password-reset/verify", `{"email":"kidist@example.com","code":"04217"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"reset_token":"reset-token"`) ||
+		rec.Header().Get("Cache-Control") != "no-store" || svc.gotToken != "kidist@example.com/04217" {
+		t.Errorf("got %d %s (input %q, cache %q)", rec.Code, rec.Body, svc.gotToken, rec.Header().Get("Cache-Control"))
+	}
+}
+
+func TestPasswordResetVerifyWithAWrongCode(t *testing.T) {
+	rec := call(t, &fakeService{err: authdomain.ErrInvalidCode}, "/v1/auth/password-reset/verify", `{"email":"k@example.com","code":"11111"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), CodeInvalidCode) {
+		t.Errorf("got %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPasswordResetComplete(t *testing.T) {
+	svc := &fakeService{}
+	rec := call(t, svc, "/v1/auth/password-reset/complete", `{"reset_token":"tok","password":"a brand new passphrase"}`)
+	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 || svc.gotToken != "tok/a brand new passphrase" {
+		t.Errorf("got %d %q (input %q)", rec.Code, rec.Body, svc.gotToken)
+	}
+}
+
+func TestPasswordResetCompleteErrors(t *testing.T) {
+	bad := call(t, &fakeService{err: authdomain.ErrInvalidResetToken}, "/v1/auth/password-reset/complete", `{"reset_token":"tok","password":"a brand new passphrase"}`)
+	if bad.Code != http.StatusBadRequest || !strings.Contains(bad.Body.String(), CodeInvalidResetToken) {
+		t.Errorf("bad token: %d %s", bad.Code, bad.Body)
+	}
+	weak := call(t, &fakeService{err: validate.Errors{{Field: "password", Code: "same_as_current", Message: "x"}}},
+		"/v1/auth/password-reset/complete", `{"reset_token":"tok","password":"correct horse battery"}`)
+	if weak.Code != http.StatusUnprocessableEntity || !strings.Contains(weak.Body.String(), "same_as_current") {
+		t.Errorf("same password: %d %s", weak.Code, weak.Body)
 	}
 }

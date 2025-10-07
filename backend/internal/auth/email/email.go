@@ -19,7 +19,7 @@ import (
 var _ domain.Notifier = (*Notifier)(nil)
 
 type texts struct {
-	codeSubject, code, attemptSubject, attempt string
+	codeSubject, code, attemptSubject, attempt, resetSubject, reset string
 }
 
 // The Amharic texts are drafts to be checked by an Amharic speaker.
@@ -31,6 +31,15 @@ var byLocale = map[string]texts{
 Your verification code is {{.Code}}. It works for {{.Minutes}} minutes.
 
 If you did not ask for this code, you can ignore this email.
+
+Addis Hiwot`,
+		resetSubject: "Your password reset code",
+		reset: `Hello {{.Name}},
+
+Your password reset code is {{.Code}}. It works for {{.Minutes}} minutes.
+
+If you did not ask to reset your password, you can ignore this email: nothing
+has changed, and your current password still works.
 
 Addis Hiwot`,
 		attemptSubject: "Sign-up attempt with your email",
@@ -51,6 +60,14 @@ Addis Hiwot`,
 የማረጋገጫ ኮድዎ {{.Code}} ነው። ለ{{.Minutes}} ደቂቃ ያገለግላል።
 
 ይህን ኮድ ካልጠየቁ ይህን ኢሜይል ችላ ማለት ይችላሉ።
+
+አዲስ ሕይወት`,
+		resetSubject: "የይለፍ ቃል መቀየሪያ ኮድዎ",
+		reset: `ሰላም {{.Name}}፣
+
+የይለፍ ቃል መቀየሪያ ኮድዎ {{.Code}} ነው። ለ{{.Minutes}} ደቂቃ ያገለግላል።
+
+የይለፍ ቃልዎን ለመቀየር ካልጠየቁ ይህን ኢሜይል ችላ ማለት ይችላሉ፤ ምንም አልተለወጠም፣ የአሁኑ የይለፍ ቃልዎም ይሠራል።
 
 አዲስ ሕይወት`,
 		attemptSubject: "በኢሜይልዎ የመመዝገብ ሙከራ",
@@ -76,6 +93,12 @@ func New(sender mail.Sender) *Notifier { return &Notifier{sender: sender} }
 func (n *Notifier) VerificationCode(ctx context.Context, to, name, locale, code string) error {
 	t := textsFor(locale)
 	return n.send(ctx, to, t.codeSubject, t.code, map[string]any{"Name": name, "Code": code, "Minutes": int(domain.CodeTTL.Minutes())})
+}
+
+// PasswordResetCode emails a password-reset code.
+func (n *Notifier) PasswordResetCode(ctx context.Context, to, name, locale, code string) error {
+	t := textsFor(locale)
+	return n.send(ctx, to, t.resetSubject, t.reset, map[string]any{"Name": name, "Code": code, "Minutes": int(domain.CodeTTL.Minutes())})
 }
 
 // SignupAttempt tells an account owner someone tried to sign up with their email.

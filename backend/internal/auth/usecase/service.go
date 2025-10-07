@@ -29,16 +29,17 @@ var usernamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]{2,19}$`)
 
 // Deps are what the Service needs; every field is required.
 type Deps struct {
-	Users      usersdomain.Repository
-	Sessions   authdomain.SessionRepository
-	Codes      authdomain.CodeRepository
-	Hasher     authdomain.PasswordHasher
-	Tokens     authdomain.AccessTokens
-	Notifier   authdomain.Notifier
-	CodeSecret []byte // keys the HMAC of email codes; at least 32 bytes
-	Now        func() time.Time
-	RefreshTTL time.Duration // how long a refresh token can be used
-	Logger     *slog.Logger  // email failures are logged, never shown to the client
+	Users       usersdomain.Repository
+	Sessions    authdomain.SessionRepository
+	Codes       authdomain.CodeRepository
+	ResetTokens authdomain.ResetTokenRepository
+	Hasher      authdomain.PasswordHasher
+	Tokens      authdomain.AccessTokens
+	Notifier    authdomain.Notifier
+	CodeSecret  []byte // keys the HMAC of email codes; at least 32 bytes
+	Now         func() time.Time
+	RefreshTTL  time.Duration // how long a refresh token can be used
+	Logger      *slog.Logger  // email failures are logged, never shown to the client
 }
 
 // Service signs people up, logs them in and manages their sessions.
@@ -51,7 +52,7 @@ type Service struct {
 // that do not exist are checked against it, so a failed login takes as long
 // whether or not the account exists.
 func NewService(d Deps) (*Service, error) {
-	if d.Users == nil || d.Sessions == nil || d.Codes == nil || d.Hasher == nil || d.Tokens == nil ||
+	if d.Users == nil || d.Sessions == nil || d.Codes == nil || d.ResetTokens == nil || d.Hasher == nil || d.Tokens == nil ||
 		d.Notifier == nil || d.Now == nil || d.Logger == nil || d.RefreshTTL <= 0 {
 		return nil, errors.New("auth: every dependency is required")
 	}
@@ -346,6 +347,9 @@ func (s *Service) issueAndEmail(ctx context.Context, u usersdomain.User, purpose
 	if err := s.Codes.Issue(ctx, u.ID, purpose, hash, now, now.Add(authdomain.CodeTTL)); err != nil {
 		return err
 	}
+	if purpose == authdomain.PurposeResetPassword {
+		return s.Notifier.PasswordResetCode(ctx, u.Email, u.DisplayName, u.Locale, code)
+	}
 	return s.Notifier.VerificationCode(ctx, u.Email, u.DisplayName, u.Locale, code)
 }
 
@@ -380,6 +384,38 @@ func (s *Service) ResendVerification(ctx context.Context, email string) error {
 
 var codePattern = regexp.MustCompile(`^[0-9]{5}$`)
 
+// useCode finds the account, spends one attempt on its live code for purpose and
+// compares it. Every failure that depends on the account (unknown email, no
+// code, wrong, expired or used-up code) returns authdomain.ErrInvalidCode, so
+// the caller cannot learn who has an account.
+func (s *Service) useCode(ctx context.Context, email, code string, purpose authdomain.CodePurpose) (usersdomain.User, error) {
+	u, err := s.Users.GetByEmail(ctx, strings.TrimSpace(email))
+	if errors.Is(err, usersdomain.ErrNotFound) {
+		return usersdomain.User{}, authdomain.ErrInvalidCode
+	}
+	if err != nil {
+		return usersdomain.User{}, err
+	}
+	now := s.Now()
+	attempt, err := s.Codes.UseAttempt(ctx, u.ID, purpose, now, authdomain.MaxCodeAttempts)
+	if errors.Is(err, authdomain.ErrNoLiveCode) {
+		return usersdomain.User{}, authdomain.ErrInvalidCode
+	}
+	if err != nil {
+		return usersdomain.User{}, err
+	}
+	if !authdomain.CodeMatches(s.CodeSecret, purpose, u.ID, code, attempt.Hash) {
+		return usersdomain.User{}, authdomain.ErrInvalidCode
+	}
+	if err := s.Codes.Consume(ctx, attempt.ID, now); err != nil {
+		if errors.Is(err, authdomain.ErrCodeAlreadyUsed) {
+			return usersdomain.User{}, authdomain.ErrInvalidCode
+		}
+		return usersdomain.User{}, err
+	}
+	return u, nil
+}
+
 // VerifyEmail checks a code sent to email. On success the email is marked
 // verified and a session starts, so the person is logged in. Every failure that
 // depends on the account (unknown email, no code, wrong, expired or used-up
@@ -391,30 +427,11 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code string) (LoginRes
 	if err := v.Err(); err != nil {
 		return LoginResult{}, err
 	}
-	u, err := s.Users.GetByEmail(ctx, strings.TrimSpace(email))
-	if errors.Is(err, usersdomain.ErrNotFound) {
-		return LoginResult{}, authdomain.ErrInvalidCode
-	}
+	u, err := s.useCode(ctx, email, code, authdomain.PurposeVerifyEmail)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	now := s.Now()
-	attempt, err := s.Codes.UseAttempt(ctx, u.ID, authdomain.PurposeVerifyEmail, now, authdomain.MaxCodeAttempts)
-	if errors.Is(err, authdomain.ErrNoLiveCode) {
-		return LoginResult{}, authdomain.ErrInvalidCode
-	}
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if !authdomain.CodeMatches(s.CodeSecret, authdomain.PurposeVerifyEmail, u.ID, code, attempt.Hash) {
-		return LoginResult{}, authdomain.ErrInvalidCode
-	}
-	if err := s.Codes.Consume(ctx, attempt.ID, now); err != nil {
-		if errors.Is(err, authdomain.ErrCodeAlreadyUsed) {
-			return LoginResult{}, authdomain.ErrInvalidCode
-		}
-		return LoginResult{}, err
-	}
 	if err := s.Users.MarkEmailVerified(ctx, u.ID, now); err != nil {
 		return LoginResult{}, err
 	}
@@ -426,4 +443,99 @@ func (s *Service) VerifyEmail(ctx context.Context, email, code string) (LoginRes
 		return LoginResult{}, err
 	}
 	return LoginResult{User: u, Tokens: tokens}, nil
+}
+
+// RequestPasswordReset emails a reset code. It returns nil for an unknown
+// email, so the endpoint answers the same for everyone and cannot be used to
+// find out who has an account.
+func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
+	u, err := s.Users.GetByEmail(ctx, strings.TrimSpace(email))
+	if errors.Is(err, usersdomain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.sendCode(ctx, u, authdomain.PurposeResetPassword)
+	return nil
+}
+
+// ResetGrant is the short-lived permission to set a new password.
+type ResetGrant struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
+// VerifyPasswordResetCode checks a reset code and returns a token that allows
+// one password change. Every failure gives authdomain.ErrInvalidCode.
+func (s *Service) VerifyPasswordResetCode(ctx context.Context, email, code string) (ResetGrant, error) {
+	code = strings.TrimSpace(code)
+	var v validate.Validator
+	v.Check(codePattern.MatchString(code), "code", "invalid_format", "must be 5 digits")
+	if err := v.Err(); err != nil {
+		return ResetGrant{}, err
+	}
+	u, err := s.useCode(ctx, email, code, authdomain.PurposeResetPassword)
+	if err != nil {
+		return ResetGrant{}, err
+	}
+	now := s.Now()
+	token, hash := authdomain.NewResetToken()
+	expires := now.Add(authdomain.ResetTokenTTL)
+	if err := s.ResetTokens.Create(ctx, u.ID, hash, now, expires); err != nil {
+		return ResetGrant{}, err
+	}
+	return ResetGrant{Token: token, ExpiresAt: expires}, nil
+}
+
+// CompletePasswordReset sets a new password with the token from
+// VerifyPasswordResetCode and ends every session of that account, so anyone who
+// had stolen a token is logged out. The token works once.
+//
+// The new password must differ from the current one, as the design screen says.
+// Reading the code proved the person can read the email, so the email counts as
+// verified afterwards.
+func (s *Service) CompletePasswordReset(ctx context.Context, token, newPassword string) error {
+	if strings.TrimSpace(token) == "" {
+		return authdomain.ErrInvalidResetToken
+	}
+	now := s.Now()
+	grant, err := s.ResetTokens.Find(ctx, authdomain.HashResetToken(token), now)
+	if err != nil {
+		return err
+	}
+	u, err := s.Users.GetByID(ctx, grant.UserID)
+	if err != nil {
+		return err
+	}
+
+	var v validate.Validator
+	authdomain.CheckPassword(&v, newPassword, u.Username, u.Email)
+	if err := v.Err(); err != nil {
+		return err
+	}
+	// Checked before the token is spent, so a rejected password can be retried.
+	if u.PasswordHash != nil {
+		same, err := s.Hasher.Verify(newPassword, *u.PasswordHash)
+		if err != nil {
+			return fmt.Errorf("auth: verify stored hash: %w", err)
+		}
+		if same {
+			return validate.Errors{{Field: "password", Code: "same_as_current", Message: "must differ from your current password"}}
+		}
+	}
+	hash, err := s.Hasher.Hash(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.ResetTokens.Consume(ctx, grant.ID, now); err != nil {
+		return err
+	}
+	if err := s.Users.SetPasswordHash(ctx, u.ID, hash); err != nil {
+		return err
+	}
+	if err := s.Sessions.RevokeUserSessions(ctx, u.ID, authdomain.RevokePasswordReset); err != nil {
+		return err
+	}
+	return s.Users.MarkEmailVerified(ctx, u.ID, now)
 }

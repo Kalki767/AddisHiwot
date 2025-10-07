@@ -38,6 +38,21 @@ func TestVerificationCodeInBothLanguages(t *testing.T) {
 	}
 }
 
+func TestPasswordResetCodeInBothLanguages(t *testing.T) {
+	for locale, want := range map[string]string{"en": "Your password reset code is 04217", "am": "የይለፍ ቃል መቀየሪያ ኮድዎ 04217 ነው"} {
+		r := &recorder{}
+		if err := New(r).PasswordResetCode(context.Background(), "k@example.com", "Kidist", locale, "04217"); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(r.sent[0].Text, want) {
+			t.Errorf("%s: text lacks %q:\n%s", locale, want, r.sent[0].Text)
+		}
+		if r.sent[0].Subject == byLocale[locale].codeSubject {
+			t.Errorf("%s: reset email has the same subject as the sign-up code email", locale)
+		}
+	}
+}
+
 func TestSignupAttemptNoticeHasNoCode(t *testing.T) {
 	for _, locale := range []string{"en", "am"} {
 		r := &recorder{}
@@ -53,7 +68,7 @@ func TestSignupAttemptNoticeHasNoCode(t *testing.T) {
 // Subjects show on lock screens: they must not name the app or its purpose.
 func TestSubjectsAreNeutral(t *testing.T) {
 	for locale, tx := range byLocale {
-		for _, s := range []string{tx.codeSubject, tx.attemptSubject} {
+		for _, s := range []string{tx.codeSubject, tx.attemptSubject, tx.resetSubject} {
 			for _, word := range []string{"Addis", "Hiwot", "recovery", "አዲስ", "ሕይወት"} {
 				if strings.Contains(s, word) {
 					t.Errorf("%s subject %q names %q", locale, s, word)

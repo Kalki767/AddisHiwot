@@ -18,7 +18,7 @@ var codeSecret = []byte("code-secret-that-is-32-bytes-long!")
 
 // testDeps fills every dependency with an in-memory fake.
 func testDeps(users usersdomain.Repository, sessions authdomain.SessionRepository, hasher authdomain.PasswordHasher, now func() time.Time) Deps {
-	return Deps{Users: users, Sessions: sessions, Codes: newFakeCodes(), Hasher: hasher, Tokens: fakeTokens{},
+	return Deps{Users: users, Sessions: sessions, Codes: newFakeCodes(), ResetTokens: newFakeResetTokens(), Hasher: hasher, Tokens: fakeTokens{},
 		Notifier: &fakeNotifier{}, CodeSecret: codeSecret, Now: now, RefreshTTL: 30 * 24 * time.Hour,
 		Logger: slog.New(slog.DiscardHandler)}
 }
@@ -93,13 +93,19 @@ func (f *fakeCodes) Consume(_ context.Context, id uuid.UUID, _ time.Time) error 
 
 // fakeNotifier records what would have been emailed.
 type fakeNotifier struct {
-	codes   []string // codes sent, in order
-	notices []string // emails that got a sign-up attempt notice
-	locale  string
+	codes      []string // verification codes sent, in order
+	resetCodes []string // password-reset codes sent, in order
+	notices    []string // emails that got a sign-up attempt notice
+	locale     string
 }
 
 func (n *fakeNotifier) VerificationCode(_ context.Context, _, _, locale, code string) error {
 	n.codes, n.locale = append(n.codes, code), locale
+	return nil
+}
+
+func (n *fakeNotifier) PasswordResetCode(_ context.Context, _, _, locale, code string) error {
+	n.resetCodes, n.locale = append(n.resetCodes, code), locale
 	return nil
 }
 

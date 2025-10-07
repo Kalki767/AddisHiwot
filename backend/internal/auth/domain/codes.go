@@ -72,6 +72,8 @@ type CodeRepository interface {
 // Notifier sends the auth emails. It knows what to say, not how mail is sent.
 type Notifier interface {
 	VerificationCode(ctx context.Context, to, name, locale, code string) error
+	// PasswordResetCode is sent when someone asks to reset their password.
+	PasswordResetCode(ctx context.Context, to, name, locale, code string) error
 	// SignupAttempt tells an account owner that someone tried to sign up with
 	// their email: they get a notice instead of a code.
 	SignupAttempt(ctx context.Context, to, name, locale string) error
