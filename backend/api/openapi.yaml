@@ -198,6 +198,92 @@ paths:
         "415": { $ref: "#/components/responses/UnsupportedMediaType" }
         "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
+  /v1/auth/password-reset/request:
+    post:
+      tags: [auth]
+      operationId: requestPasswordReset
+      summary: Ask for a password-reset code by email.
+      description: |
+        Always answers 202 with the same body, whether or not the email has an account, so this endpoint
+        cannot be used to find out who has one. The code follows the same rules as a verification code:
+        5 digits, 10 minutes, 5 attempts, at most 5 codes an hour.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResendCodeRequest" }
+      responses:
+        "202":
+          description: Accepted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResetRequested" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/auth/password-reset/verify:
+    post:
+      tags: [auth]
+      operationId: verifyPasswordResetCode
+      summary: Swap the reset code for a short-lived reset token.
+      description: |
+        A wrong, expired or used-up code, and an email without an account, all answer 400 INVALID_CODE.
+        The token returned allows exactly one password change and lives 15 minutes.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VerifyEmailRequest" }
+      responses:
+        "200":
+          description: "The reset token. Sent with `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResetGrant" }
+        "400":
+          description: Wrong or expired code (INVALID_CODE), or a malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+  /v1/auth/password-reset/complete:
+    post:
+      tags: [auth]
+      operationId: completePasswordReset
+      summary: Set a new password with the reset token.
+      description: |
+        The new password must differ from the current one, and must follow the usual password rules; both are
+        checked before the token is spent, so a rejected password can be corrected and sent again. On success
+        every session of the account is ended, the email counts as verified, and the token cannot be used again.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompleteResetRequest" }
+      responses:
+        "204": { description: The password was changed and every session was ended. }
+        "400":
+          description: Unknown, expired or already used reset token (INVALID_RESET_TOKEN), or a malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422":
+          description: |
+            The new password is not valid (VALIDATION_FAILED). Codes: too_short, too_long, too_common,
+            contains_username, contains_email, same_as_current.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
   /v1/auth/refresh:
     post:
       tags: [auth]
@@ -322,7 +408,7 @@ components:
               enum: [BAD_JSON, EMPTY_BODY, UNKNOWN_FIELD, BODY_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE,
                      VALIDATION_FAILED, BAD_CURSOR, NOT_FOUND, METHOD_NOT_ALLOWED, INTERNAL,
                      INVALID_CREDENTIALS, INVALID_REFRESH_TOKEN, UNAUTHENTICATED, TOKEN_EXPIRED, INVALID_TOKEN,
-                     INVALID_CODE, RATE_LIMITED]
+                     INVALID_CODE, RATE_LIMITED, INVALID_RESET_TOKEN]
             message:
               type: string
               description: English explanation for developers and logs; not shown to users as is.
@@ -406,6 +492,25 @@ components:
       required: [email]
       properties:
         email: { type: string, format: email }
+    ResetRequested:
+      type: object
+      required: [status, message]
+      properties:
+        status: { type: string, const: reset_code_sent }
+        message: { type: string }
+    ResetGrant:
+      type: object
+      required: [reset_token, expires_at]
+      properties:
+        reset_token: { type: string, description: Opaque; allows one password change. }
+        expires_at: { type: string, format: date-time }
+    CompleteResetRequest:
+      type: object
+      additionalProperties: false
+      required: [reset_token, password]
+      properties:
+        reset_token: { type: string }
+        password: { type: string, minLength: 8, maxLength: 128 }
     RefreshRequest:
       type: object
       additionalProperties: false
