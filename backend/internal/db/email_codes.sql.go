@@ -71,6 +71,18 @@ func (q *Queries) CreateEmailCode(ctx context.Context, arg CreateEmailCodeParams
 	return err
 }
 
+const lockUserCodes = `-- name: LockUserCodes :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))
+`
+
+// Serialises issuing per person and purpose for the rest of the transaction, so
+// two requests cannot both retire the live code and then insert a new one (the
+// second insert would break the "one live code" index).
+func (q *Queries) LockUserCodes(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, lockUserCodes, key)
+	return err
+}
+
 const retireLiveCodes = `-- name: RetireLiveCodes :exec
 UPDATE email_codes SET consumed_at = $1
 WHERE user_id = $2 AND purpose = $3 AND consumed_at IS NULL

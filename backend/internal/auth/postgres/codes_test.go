@@ -108,3 +108,35 @@ func TestConsumeOnlyOnce(t *testing.T) {
 		t.Errorf("after consume: err = %v, want ErrNoLiveCode", err)
 	}
 }
+
+// Two requests issuing a code at the same moment (a double tap on "Resend")
+// must both succeed and leave exactly one live code.
+func TestConcurrentIssueIsSerialised(t *testing.T) {
+	_, pool, userID := setup(t)
+	codes := postgres.NewCodes(pool)
+	ctx := context.Background()
+	now := time.Now()
+	p := domain.PurposeVerifyEmail
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
+	for i := range 5 {
+		wg.Go(func() {
+			code := string(rune('0'+i)) + "1234"
+			errs <- codes.Issue(ctx, userID, p, domain.HashCode(secret, p, userID, code), now, now.Add(time.Minute))
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("Issue: %v", err)
+		}
+	}
+	if n, _ := codes.CountSince(ctx, userID, p, now.Add(-time.Hour)); n != 5 {
+		t.Errorf("codes issued = %d, want 5", n)
+	}
+	if _, err := codes.UseAttempt(ctx, userID, p, now, domain.MaxCodeAttempts); err != nil {
+		t.Errorf("exactly one code must be live afterwards: %v", err)
+	}
+}

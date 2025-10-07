@@ -1,3 +1,9 @@
+-- name: LockUserCodes :exec
+-- Serialises issuing per person and purpose for the rest of the transaction, so
+-- two requests cannot both retire the live code and then insert a new one (the
+-- second insert would break the "one live code" index).
+SELECT pg_advisory_xact_lock(hashtextextended(@key::text, 0));
+
 -- name: RetireLiveCodes :exec
 -- A new code replaces the live one, so only the latest email works.
 UPDATE email_codes SET consumed_at = @now

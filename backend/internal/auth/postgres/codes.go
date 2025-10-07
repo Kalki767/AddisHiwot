@@ -33,6 +33,9 @@ func (c *Codes) Issue(ctx context.Context, userID uuid.UUID, purpose domain.Code
 	}
 	defer tx.Rollback(context.Background()) //nolint:errcheck // a no-op after Commit
 	q := c.q.WithTx(tx)
+	if err := q.LockUserCodes(ctx, userID.String()+"/"+string(purpose)); err != nil {
+		return fmt.Errorf("auth: lock codes: %w", err)
+	}
 	if err := q.RetireLiveCodes(ctx, db.RetireLiveCodesParams{UserID: userID, Purpose: string(purpose), Now: &now}); err != nil {
 		return fmt.Errorf("auth: retire codes: %w", err)
 	}
