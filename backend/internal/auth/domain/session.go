@@ -75,6 +75,9 @@ type SessionRepository interface {
 	Reissue(ctx context.Context, oldTokenID, successorID, sessionID uuid.UUID, newHash []byte, newExpiresAt, now time.Time) error
 	// RevokeSession ends a session; revoking an ended session is not an error.
 	RevokeSession(ctx context.Context, sessionID uuid.UUID, reason RevokeReason) error
+	// RevokeUserSessions ends every live session of one person, used after a
+	// password reset so a thief holding old tokens is logged out everywhere.
+	RevokeUserSessions(ctx context.Context, userID uuid.UUID, reason RevokeReason) error
 }
 
 // Claims are what an access token proves.
@@ -93,16 +96,22 @@ type AccessTokens interface {
 
 // NewRefreshToken returns a new random refresh token (256 bits, URL-safe text)
 // and the hash to store for it.
-func NewRefreshToken() (token string, hash []byte) {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b) // crypto/rand.Read never fails since Go 1.24
-	token = base64.RawURLEncoding.EncodeToString(b)
-	return token, HashRefreshToken(token)
-}
+func NewRefreshToken() (token string, hash []byte) { return newOpaqueToken() }
 
 // HashRefreshToken returns the SHA-256 of a refresh token. A fast hash is right
 // here: the token is random and long, so it cannot be guessed like a password.
-func HashRefreshToken(token string) []byte {
+func HashRefreshToken(token string) []byte { return hashOpaqueToken(token) }
+
+// newOpaqueToken returns 256 random bits as URL-safe text, and its hash. Used
+// for every token that is a secret string rather than a signed message.
+func newOpaqueToken() (token string, hash []byte) {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b) // crypto/rand.Read never fails since Go 1.24
+	token = base64.RawURLEncoding.EncodeToString(b)
+	return token, hashOpaqueToken(token)
+}
+
+func hashOpaqueToken(token string) []byte {
 	sum := sha256.Sum256([]byte(token))
 	return sum[:]
 }

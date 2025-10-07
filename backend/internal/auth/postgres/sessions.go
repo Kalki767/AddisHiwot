@@ -125,6 +125,14 @@ func wrap(op string, err error) error {
 	return err
 }
 
+// RevokeUserSessions ends every live session of one person.
+func (s *Sessions) RevokeUserSessions(ctx context.Context, userID uuid.UUID, reason domain.RevokeReason) error {
+	if _, err := s.q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID, Reason: ptr(string(reason)), Now: ptr(time.Now())}); err != nil {
+		return fmt.Errorf("auth: revoke user sessions: %w", err)
+	}
+	return nil
+}
+
 // RevokeSession ends a session; an already ended session is left as it is.
 func (s *Sessions) RevokeSession(ctx context.Context, sessionID uuid.UUID, reason domain.RevokeReason) error {
 	if _, err := s.q.RevokeSession(ctx, db.RevokeSessionParams{ID: sessionID, Reason: ptr(string(reason))}); err != nil {
