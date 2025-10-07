@@ -154,3 +154,17 @@ func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedPa
 	_, err := q.db.Exec(ctx, markEmailVerified, arg.VerifiedAt, arg.ID)
 	return err
 }
+
+const updatePasswordHash = `-- name: UpdatePasswordHash :exec
+UPDATE users SET password_hash = $1 WHERE id = $2
+`
+
+type UpdatePasswordHashParams struct {
+	PasswordHash *string
+	ID           uuid.UUID
+}
+
+func (q *Queries) UpdatePasswordHash(ctx context.Context, arg UpdatePasswordHashParams) error {
+	_, err := q.db.Exec(ctx, updatePasswordHash, arg.PasswordHash, arg.ID)
+	return err
+}

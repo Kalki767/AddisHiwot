@@ -32,3 +32,8 @@ UPDATE auth_sessions SET last_used_at = now() WHERE id = @id;
 -- name: RevokeSession :execrows
 UPDATE auth_sessions SET revoked_at = now(), revoked_reason = @reason
 WHERE id = @id AND revoked_at IS NULL;
+
+-- name: RevokeUserSessions :execrows
+-- Ends every live session of one person, used after a password reset.
+UPDATE auth_sessions SET revoked_at = @now, revoked_reason = @reason
+WHERE user_id = @user_id AND revoked_at IS NULL;

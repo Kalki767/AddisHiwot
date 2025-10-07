@@ -127,6 +127,26 @@ func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) (i
 	return result.RowsAffected(), nil
 }
 
+const revokeUserSessions = `-- name: RevokeUserSessions :execrows
+UPDATE auth_sessions SET revoked_at = $1, revoked_reason = $2
+WHERE user_id = $3 AND revoked_at IS NULL
+`
+
+type RevokeUserSessionsParams struct {
+	Now    *time.Time
+	Reason *string
+	UserID uuid.UUID
+}
+
+// Ends every live session of one person, used after a password reset.
+func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeUserSessions, arg.Now, arg.Reason, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setRefreshTokenReplacedBy = `-- name: SetRefreshTokenReplacedBy :exec
 UPDATE refresh_tokens SET replaced_by = $1 WHERE id = $2
 `

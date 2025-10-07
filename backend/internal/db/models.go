@@ -30,6 +30,15 @@ type EmailCode struct {
 	ConsumedAt *time.Time
 }
 
+type PasswordResetToken struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	TokenHash []byte
+	CreatedAt time.Time
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+}
+
 type RefreshToken struct {
 	ID         uuid.UUID
 	SessionID  uuid.UUID

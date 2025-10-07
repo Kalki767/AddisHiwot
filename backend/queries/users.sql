@@ -19,3 +19,6 @@ SELECT * FROM users WHERE username = @username;
 -- name: MarkEmailVerified :exec
 -- Keeps the first verification time if it is called again.
 UPDATE users SET email_verified_at = coalesce(email_verified_at, @verified_at) WHERE id = @id;
+
+-- name: UpdatePasswordHash :exec
+UPDATE users SET password_hash = @password_hash WHERE id = @id;
