@@ -66,4 +66,6 @@ type Repository interface {
 	// MarkEmailVerified records the first time the email was verified; calling it
 	// again keeps that time.
 	MarkEmailVerified(ctx context.Context, id uuid.UUID, at time.Time) error
+	// SetPasswordHash replaces the stored password hash.
+	SetPasswordHash(ctx context.Context, id uuid.UUID, hash string) error
 }

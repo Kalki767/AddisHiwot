@@ -59,6 +59,16 @@ func (f *fakeUsers) GetByUsername(_ context.Context, n string) (usersdomain.User
 	return f.find(func(u usersdomain.User) bool { return strings.EqualFold(u.Username, n) })
 }
 
+func (f *fakeUsers) SetPasswordHash(_ context.Context, id uuid.UUID, hash string) error {
+	u, ok := f.byID[id]
+	if !ok {
+		return usersdomain.ErrNotFound
+	}
+	u.PasswordHash = &hash
+	f.byID[id] = u
+	return nil
+}
+
 func (f *fakeUsers) MarkEmailVerified(_ context.Context, id uuid.UUID, at time.Time) error {
 	u, ok := f.byID[id]
 	if !ok {

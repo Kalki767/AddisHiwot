@@ -83,6 +83,14 @@ func (r *Repository) MarkEmailVerified(ctx context.Context, id uuid.UUID, at tim
 	return nil
 }
 
+// SetPasswordHash replaces the stored password hash.
+func (r *Repository) SetPasswordHash(ctx context.Context, id uuid.UUID, hash string) error {
+	if err := r.q.UpdatePasswordHash(ctx, db.UpdatePasswordHashParams{ID: id, PasswordHash: &hash}); err != nil {
+		return fmt.Errorf("users: set password hash: %w", err)
+	}
+	return nil
+}
+
 // PostgreSQL error codes (https://www.postgresql.org/docs/current/errcodes-appendix.html).
 const (
 	uniqueViolation = "23505"
