@@ -95,6 +95,7 @@ services:
       AUTH_CODE_SECRET: ${AUTH_CODE_SECRET:?set AUTH_CODE_SECRET in .env}
       MAIL_FROM: ${MAIL_FROM:?set MAIL_FROM in .env}
       SMTP_ADDR: "mailpit:1025"
+      GOOGLE_CLIENT_IDS: ${GOOGLE_CLIENT_IDS:-}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8080}:8080"
     depends_on:

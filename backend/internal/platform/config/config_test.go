@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -49,12 +50,16 @@ func TestLoadOptionalValues(t *testing.T) {
 	m := valid()
 	m["LOG_LEVEL"] = "debug"
 	m["SHUTDOWN_TIMEOUT"] = "3s"
+	m["GOOGLE_CLIENT_IDS"] = " 1-android.apps.googleusercontent.com, ,2-web.apps.googleusercontent.com"
 	cfg, err := Load(env(m))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if cfg.LogLevel != slog.LevelDebug || cfg.ShutdownTimeout != 3*time.Second {
 		t.Errorf("got LogLevel=%v ShutdownTimeout=%v", cfg.LogLevel, cfg.ShutdownTimeout)
+	}
+	if want := []string{"1-android.apps.googleusercontent.com", "2-web.apps.googleusercontent.com"}; !slices.Equal(cfg.GoogleClientIDs, want) {
+		t.Errorf("GoogleClientIDs = %q, want %q", cfg.GoogleClientIDs, want)
 	}
 }
 
@@ -100,6 +105,7 @@ func TestLoadRejectsBadValues(t *testing.T) {
 		{"REFRESH_TOKEN_TTL", "0s", "REFRESH_TOKEN_TTL must be positive"},
 		{"REFRESH_TOKEN_TTL", "10m", "REFRESH_TOKEN_TTL must be longer than ACCESS_TOKEN_TTL"},
 		{"APP_ENV", "   ", "APP_ENV is required"},
+		{"GOOGLE_CLIENT_IDS", "my-app", "GOOGLE_CLIENT_IDS must list IDs ending in .apps.googleusercontent.com"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key+"="+tt.value, func(t *testing.T) {

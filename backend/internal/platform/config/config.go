@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,12 @@ type Config struct {
 	AuthCodeSecret  []byte        // AUTH_CODE_SECRET: keys the HMAC of email codes; at least 32 bytes
 	SMTPAddr        string        // SMTP_ADDR: host:port of the mail server (Mailpit in development)
 	MailFrom        string        // MAIL_FROM: sender, e.g. "Addis Hiwot <no-reply@addishiwot.test>"
+	// GOOGLE_CLIENT_IDS: comma-separated OAuth client IDs whose Google ID tokens
+	// are accepted (the app's Android, iOS and web IDs). Empty turns Google sign-in off.
+	GoogleClientIDs []string
 }
+
+var googleClientID = regexp.MustCompile(`^[0-9A-Za-z-]+\.apps\.googleusercontent\.com$`)
 
 // MinJWTSecretBytes is the shortest accepted JWT_SECRET or AUTH_CODE_SECRET (256 bits).
 const MinJWTSecretBytes = 32
@@ -92,6 +98,16 @@ func Load(getenv func(string) string) (Config, error) {
 		if u, err := url.Parse(cfg.DatabaseURL); err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 			errs = append(errs, errors.New("DATABASE_URL must be a postgres:// URL"))
 		}
+	}
+
+	for id := range strings.SplitSeq(getenv("GOOGLE_CLIENT_IDS"), ",") {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		}
+		if !googleClientID.MatchString(id) {
+			errs = append(errs, fmt.Errorf("GOOGLE_CLIENT_IDS must list IDs ending in .apps.googleusercontent.com, got %q", id))
+		}
+		cfg.GoogleClientIDs = append(cfg.GoogleClientIDs, id)
 	}
 
 	level := optional("LOG_LEVEL", "info")
