@@ -35,6 +35,9 @@ const (
 	RevokeReuseDetected  RevokeReason = "reuse_detected"
 	RevokePasswordReset  RevokeReason = "password_reset"
 	RevokeAccountDeleted RevokeReason = "account_deleted"
+	// RevokeGoogleLinked: a Google account was linked to an account whose email
+	// was never verified, so its password and sessions may belong to someone else.
+	RevokeGoogleLinked RevokeReason = "google_linked"
 )
 
 // RefreshTokenRecord is a stored refresh token with what is needed to judge it.
