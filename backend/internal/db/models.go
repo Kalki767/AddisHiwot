@@ -64,3 +64,11 @@ type User struct {
 	TermsVersion     *string
 	EmailVerifiedAt  *time.Time
 }
+
+type UserIdentity struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	Provider  string
+	Subject   string
+	CreatedAt time.Time
+}
