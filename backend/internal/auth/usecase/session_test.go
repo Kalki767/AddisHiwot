@@ -108,7 +108,7 @@ func (f *fakeSessions) replace(id, sid uuid.UUID, newHash []byte, exp, now time.
 	return nil
 }
 
-func (f *fakeSessions) RevokeUserSessions(_ context.Context, user uuid.UUID, reason authdomain.RevokeReason) error {
+func (f *fakeSessions) revokeUser(user uuid.UUID, reason authdomain.RevokeReason) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, t := range f.tokens {
@@ -118,7 +118,6 @@ func (f *fakeSessions) RevokeUserSessions(_ context.Context, user uuid.UUID, rea
 			}
 		}
 	}
-	return nil
 }
 
 func (f *fakeSessions) RevokeSession(_ context.Context, sid uuid.UUID, reason authdomain.RevokeReason) error {

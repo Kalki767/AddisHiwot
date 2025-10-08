@@ -125,14 +125,6 @@ func wrap(op string, err error) error {
 	return err
 }
 
-// RevokeUserSessions ends every live session of one person.
-func (s *Sessions) RevokeUserSessions(ctx context.Context, userID uuid.UUID, reason domain.RevokeReason) error {
-	if _, err := s.q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID, Reason: ptr(string(reason)), Now: ptr(time.Now())}); err != nil {
-		return fmt.Errorf("auth: revoke user sessions: %w", err)
-	}
-	return nil
-}
-
 // RevokeSession ends a session; an already ended session is left as it is.
 func (s *Sessions) RevokeSession(ctx context.Context, sessionID uuid.UUID, reason domain.RevokeReason) error {
 	if _, err := s.q.RevokeSession(ctx, db.RevokeSessionParams{ID: sessionID, Reason: ptr(string(reason))}); err != nil {
@@ -142,12 +134,17 @@ func (s *Sessions) RevokeSession(ctx context.Context, sessionID uuid.UUID, reaso
 }
 
 func (s *Sessions) inTx(ctx context.Context, fn func(*db.Queries) error) error {
-	tx, err := s.conn.Begin(ctx)
+	return inTx(ctx, s.conn, s.q, fn)
+}
+
+// inTx runs fn in one transaction: everything fn does is kept, or nothing.
+func inTx(ctx context.Context, conn Conn, q *db.Queries, fn func(*db.Queries) error) error {
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(context.Background()) //nolint:errcheck // a no-op after Commit
-	if err := fn(s.q.WithTx(tx)); err != nil {
+	if err := fn(q.WithTx(tx)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

@@ -29,8 +29,11 @@ type ResetTokenRepository interface {
 	// ErrInvalidResetToken. It does not consume the token, so a request that
 	// fails later (for example a password that breaks the rules) can be retried.
 	Find(ctx context.Context, hash []byte, now time.Time) (ResetToken, error)
-	// Consume marks the token used; ErrInvalidResetToken if another request was first.
-	Consume(ctx context.Context, id uuid.UUID, now time.Time) error
+	// Complete spends the token and, in the same transaction, stores the new
+	// password hash, ends every session of the account and marks its email
+	// verified: all of it happens or none of it. ErrInvalidResetToken if another
+	// request spent the token first.
+	Complete(ctx context.Context, t ResetToken, passwordHash string, now time.Time) error
 }
 
 // NewResetToken returns a new random reset token and the hash to store, as

@@ -528,14 +528,5 @@ func (s *Service) CompletePasswordReset(ctx context.Context, token, newPassword 
 	if err != nil {
 		return err
 	}
-	if err := s.ResetTokens.Consume(ctx, grant.ID, now); err != nil {
-		return err
-	}
-	if err := s.Users.SetPasswordHash(ctx, u.ID, hash); err != nil {
-		return err
-	}
-	if err := s.Sessions.RevokeUserSessions(ctx, u.ID, authdomain.RevokePasswordReset); err != nil {
-		return err
-	}
-	return s.Users.MarkEmailVerified(ctx, u.ID, now)
+	return s.ResetTokens.Complete(ctx, grant, hash, now)
 }

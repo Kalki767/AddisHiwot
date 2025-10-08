@@ -11,14 +11,13 @@ import (
 	"github.com/google/uuid"
 
 	authdomain "github.com/Kalki767/AddisHiwot/backend/internal/auth/domain"
-	usersdomain "github.com/Kalki767/AddisHiwot/backend/internal/users/domain"
 )
 
 var codeSecret = []byte("code-secret-that-is-32-bytes-long!")
 
 // testDeps fills every dependency with an in-memory fake.
-func testDeps(users usersdomain.Repository, sessions authdomain.SessionRepository, hasher authdomain.PasswordHasher, now func() time.Time) Deps {
-	return Deps{Users: users, Sessions: sessions, Codes: newFakeCodes(), ResetTokens: newFakeResetTokens(), Hasher: hasher, Tokens: fakeTokens{},
+func testDeps(users *fakeUsers, sessions *fakeSessions, hasher authdomain.PasswordHasher, now func() time.Time) Deps {
+	return Deps{Users: users, Sessions: sessions, Codes: newFakeCodes(), ResetTokens: newFakeResetTokens(users, sessions), Hasher: hasher, Tokens: fakeTokens{},
 		Notifier: &fakeNotifier{}, CodeSecret: codeSecret, Now: now, RefreshTTL: 30 * 24 * time.Hour,
 		Logger: slog.New(slog.DiscardHandler)}
 }

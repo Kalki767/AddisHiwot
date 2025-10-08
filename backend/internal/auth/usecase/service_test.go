@@ -59,7 +59,7 @@ func (f *fakeUsers) GetByUsername(_ context.Context, n string) (usersdomain.User
 	return f.find(func(u usersdomain.User) bool { return strings.EqualFold(u.Username, n) })
 }
 
-func (f *fakeUsers) SetPasswordHash(_ context.Context, id uuid.UUID, hash string) error {
+func (f *fakeUsers) setPasswordHash(id uuid.UUID, hash string) error {
 	u, ok := f.byID[id]
 	if !ok {
 		return usersdomain.ErrNotFound

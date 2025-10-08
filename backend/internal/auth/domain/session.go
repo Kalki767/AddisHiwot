@@ -75,9 +75,6 @@ type SessionRepository interface {
 	Reissue(ctx context.Context, oldTokenID, successorID, sessionID uuid.UUID, newHash []byte, newExpiresAt, now time.Time) error
 	// RevokeSession ends a session; revoking an ended session is not an error.
 	RevokeSession(ctx context.Context, sessionID uuid.UUID, reason RevokeReason) error
-	// RevokeUserSessions ends every live session of one person, used after a
-	// password reset so a thief holding old tokens is logged out everywhere.
-	RevokeUserSessions(ctx context.Context, userID uuid.UUID, reason RevokeReason) error
 }
 
 // Claims are what an access token proves.

@@ -13,10 +13,13 @@ import (
 	authdomain "github.com/Kalki767/AddisHiwot/backend/internal/auth/domain"
 )
 
-// fakeResetTokens is an in-memory ResetTokenRepository.
+// fakeResetTokens is an in-memory ResetTokenRepository; Complete changes the
+// fake users and sessions as the PostgreSQL transaction does.
 type fakeResetTokens struct {
-	mu     sync.Mutex
-	tokens map[string]*fakeResetToken
+	mu       sync.Mutex
+	tokens   map[string]*fakeResetToken
+	users    *fakeUsers
+	sessions *fakeSessions
 }
 
 type fakeResetToken struct {
@@ -25,8 +28,8 @@ type fakeResetToken struct {
 	used     bool
 }
 
-func newFakeResetTokens() *fakeResetTokens {
-	return &fakeResetTokens{tokens: map[string]*fakeResetToken{}}
+func newFakeResetTokens(users *fakeUsers, sessions *fakeSessions) *fakeResetTokens {
+	return &fakeResetTokens{tokens: map[string]*fakeResetToken{}, users: users, sessions: sessions}
 }
 
 func (f *fakeResetTokens) Create(_ context.Context, user uuid.UUID, hash []byte, _, exp time.Time) error {
@@ -46,16 +49,20 @@ func (f *fakeResetTokens) Find(_ context.Context, hash []byte, now time.Time) (a
 	return authdomain.ResetToken{ID: t.id, UserID: t.user}, nil
 }
 
-func (f *fakeResetTokens) Consume(_ context.Context, id uuid.UUID, _ time.Time) error {
+func (f *fakeResetTokens) Complete(ctx context.Context, rt authdomain.ResetToken, hash string, now time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, t := range f.tokens {
-		if t.id == id {
+		if t.id == rt.ID {
 			if t.used {
 				return authdomain.ErrInvalidResetToken
 			}
 			t.used = true
-			return nil
+			if err := f.users.setPasswordHash(rt.UserID, hash); err != nil {
+				return err
+			}
+			f.sessions.revokeUser(rt.UserID, authdomain.RevokePasswordReset)
+			return f.users.MarkEmailVerified(ctx, rt.UserID, now)
 		}
 	}
 	return authdomain.ErrInvalidResetToken
