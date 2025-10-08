@@ -138,6 +138,73 @@ paths:
         "422": { $ref: "#/components/responses/ValidationFailed" }
         "500": { $ref: "#/components/responses/Internal" }
 
+  /v1/auth/google:
+    post:
+      tags: [auth]
+      operationId: signInWithGoogle
+      summary: Sign in with a Google ID token, creating or linking the account.
+      description: |
+        The app signs in with Google and sends the ID token. The server checks its signature with Google's keys,
+        its issuer, its audience (one of our OAuth client IDs) and its expiry. Then:
+
+        1. a Google account linked before logs in to its account;
+        2. otherwise an account with the same email gets the Google account linked; if that email was never
+           verified, its password is removed and its sessions end (whoever set it never proved they own the email);
+        3. otherwise a new account is created with a generated username and no password. This needs
+           `is_adult` and `accept_terms`, as sign-up does; without them the answer is 422 and the app should
+           ask for them and send the same ID token again.
+
+        Only emails Google is the authority for are accepted: Gmail addresses and verified Google Workspace
+        addresses (403 GOOGLE_EMAIL_NOT_SUPPORTED otherwise, whatever accounts exist).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GoogleSignInRequest" }
+      responses:
+        "200":
+          description: "Logged in. Sent with `Cache-Control: no-store`."
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, tokens, created]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+                  tokens: { $ref: "#/components/schemas/Tokens" }
+                  created: { type: boolean, description: True when this sign-in created the account. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: Forged, expired or wrong-audience ID token (INVALID_GOOGLE_TOKEN).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "403":
+          description: Google is not the authority for this email (GOOGLE_EMAIL_NOT_SUPPORTED).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: The account is linked to a different Google account (GOOGLE_ACCOUNT_CONFLICT).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422":
+          description: A new account needs consent (VALIDATION_FAILED with must_be_adult, must_accept_terms).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503":
+          description: Google sign-in is not configured on this server (GOOGLE_SIGN_IN_UNAVAILABLE).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
   /v1/auth/verify-email:
     post:
       tags: [auth]
@@ -451,6 +518,15 @@ components:
       properties:
         status: { type: string, const: verification_pending }
         message: { type: string }
+    GoogleSignInRequest:
+      type: object
+      additionalProperties: false
+      required: [id_token]
+      properties:
+        id_token: { type: string, description: The ID token from Google sign-in on the device. }
+        is_adult: { type: boolean, description: Needed only when the account is new (must_be_adult). }
+        accept_terms: { type: boolean, description: Needed only when the account is new (must_accept_terms). }
+        locale: { type: string, enum: [en, am], default: en, description: Used only when the account is new. }
     LoginRequest:
       type: object
       additionalProperties: false
