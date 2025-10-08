@@ -20,7 +20,9 @@ import (
 
 	"github.com/Kalki767/AddisHiwot/backend/internal/api"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/argon2id"
+	authdomain "github.com/Kalki767/AddisHiwot/backend/internal/auth/domain"
 	authemail "github.com/Kalki767/AddisHiwot/backend/internal/auth/email"
+	"github.com/Kalki767/AddisHiwot/backend/internal/auth/googleid"
 	authhttp "github.com/Kalki767/AddisHiwot/backend/internal/auth/http"
 	"github.com/Kalki767/AddisHiwot/backend/internal/auth/jwttoken"
 	authpostgres "github.com/Kalki767/AddisHiwot/backend/internal/auth/postgres"
@@ -74,12 +76,25 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A nil verifier (no client IDs) answers Google sign-in with 503.
+	var google authdomain.GoogleVerifier
+	if len(cfg.GoogleClientIDs) > 0 {
+		v, err := googleid.New(googleid.Config{ClientIDs: cfg.GoogleClientIDs})
+		if err != nil {
+			return err
+		}
+		google = v
+	} else {
+		logger.WarnContext(ctx, "GOOGLE_CLIENT_IDS is empty: Google sign-in is off")
+	}
 	usersRepo := userspostgres.NewRepository(pool)
 	authService, err := authusecase.NewService(authusecase.Deps{
 		Users:       usersRepo,
 		Sessions:    authpostgres.NewSessions(pool),
 		Codes:       authpostgres.NewCodes(pool),
 		ResetTokens: authpostgres.NewResetTokens(pool),
+		Identities:  authpostgres.NewIdentities(pool),
+		Google:      google,
 		Hasher:      argon2id.New(argon2id.OWASPMinimum),
 		Tokens:      tokens,
 		Notifier:    authemail.New(sender),

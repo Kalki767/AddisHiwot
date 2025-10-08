@@ -27,19 +27,22 @@ const DefaultTimezone = "Africa/Addis_Ababa"
 // Same rule as the users_username_format check in the database.
 var usernamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]{2,19}$`)
 
-// Deps are what the Service needs; every field is required.
+// Deps are what the Service needs; every field is required except Google.
 type Deps struct {
 	Users       usersdomain.Repository
 	Sessions    authdomain.SessionRepository
 	Codes       authdomain.CodeRepository
 	ResetTokens authdomain.ResetTokenRepository
-	Hasher      authdomain.PasswordHasher
-	Tokens      authdomain.AccessTokens
-	Notifier    authdomain.Notifier
-	CodeSecret  []byte // keys the HMAC of email codes; at least 32 bytes
-	Now         func() time.Time
-	RefreshTTL  time.Duration // how long a refresh token can be used
-	Logger      *slog.Logger  // email failures are logged, never shown to the client
+	Identities  authdomain.IdentityRepository
+	// Google checks Google ID tokens; nil turns Google sign-in off.
+	Google     authdomain.GoogleVerifier
+	Hasher     authdomain.PasswordHasher
+	Tokens     authdomain.AccessTokens
+	Notifier   authdomain.Notifier
+	CodeSecret []byte // keys the HMAC of email codes; at least 32 bytes
+	Now        func() time.Time
+	RefreshTTL time.Duration // how long a refresh token can be used
+	Logger     *slog.Logger  // email failures are logged, never shown to the client
 }
 
 // Service signs people up, logs them in and manages their sessions.
@@ -52,7 +55,7 @@ type Service struct {
 // that do not exist are checked against it, so a failed login takes as long
 // whether or not the account exists.
 func NewService(d Deps) (*Service, error) {
-	if d.Users == nil || d.Sessions == nil || d.Codes == nil || d.ResetTokens == nil || d.Hasher == nil || d.Tokens == nil ||
+	if d.Users == nil || d.Sessions == nil || d.Codes == nil || d.ResetTokens == nil || d.Identities == nil || d.Hasher == nil || d.Tokens == nil ||
 		d.Notifier == nil || d.Now == nil || d.Logger == nil || d.RefreshTTL <= 0 {
 		return nil, errors.New("auth: every dependency is required")
 	}

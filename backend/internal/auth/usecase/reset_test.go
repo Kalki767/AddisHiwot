@@ -58,7 +58,7 @@ func (f *fakeResetTokens) Complete(ctx context.Context, rt authdomain.ResetToken
 				return authdomain.ErrInvalidResetToken
 			}
 			t.used = true
-			if err := f.users.setPasswordHash(rt.UserID, hash); err != nil {
+			if err := f.users.setPasswordHash(rt.UserID, &hash); err != nil {
 				return err
 			}
 			f.sessions.revokeUser(rt.UserID, authdomain.RevokePasswordReset)

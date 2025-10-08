@@ -3,6 +3,7 @@ package authhttp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +27,7 @@ type fakeService struct {
 	principal authdomain.Principal
 	gotInput  usecase.SignupInput
 	gotToken  string
+	gotGoogle usecase.GoogleSignInInput
 }
 
 func (f *fakeService) Signup(_ context.Context, in usecase.SignupInput) (usecase.SignupOutcome, error) {
@@ -75,6 +77,11 @@ func (f *fakeService) VerifyPasswordResetCode(_ context.Context, email, code str
 func (f *fakeService) CompletePasswordReset(_ context.Context, token, password string) error {
 	f.gotToken = token + "/" + password
 	return f.err
+}
+
+func (f *fakeService) SignInWithGoogle(_ context.Context, in usecase.GoogleSignInInput) (usecase.GoogleSignInResult, error) {
+	f.gotGoogle = in
+	return usecase.GoogleSignInResult{LoginResult: usecase.LoginResult{User: f.user, Tokens: f.tokens}, Created: true}, f.err
 }
 
 // allowAll is a limiter that never limits.
@@ -337,7 +344,7 @@ func TestPerAccountLimitAnswers429(t *testing.T) {
 func TestPerIPLimitCoversEveryAuthRoute(t *testing.T) {
 	for _, path := range []string{"/v1/auth/signup", "/v1/auth/login", "/v1/auth/refresh", "/v1/auth/logout",
 		"/v1/auth/verify-email", "/v1/auth/resend-code", "/v1/auth/password-reset/request",
-		"/v1/auth/password-reset/verify", "/v1/auth/password-reset/complete"} {
+		"/v1/auth/password-reset/verify", "/v1/auth/password-reset/complete", "/v1/auth/google"} {
 		limits := Limits{PerIP: &allowN{n: 0}, PerAccount: allowAll{}}
 		if rec := callWith(t, &fakeService{}, limits, path, `{}`); rec.Code != http.StatusTooManyRequests {
 			t.Errorf("%s: %d, want 429", path, rec.Code)
@@ -386,5 +393,38 @@ func TestPasswordResetCompleteErrors(t *testing.T) {
 		"/v1/auth/password-reset/complete", `{"reset_token":"tok","password":"correct horse battery"}`)
 	if weak.Code != http.StatusUnprocessableEntity || !strings.Contains(weak.Body.String(), "same_as_current") {
 		t.Errorf("same password: %d %s", weak.Code, weak.Body)
+	}
+}
+
+func TestGoogleSignIn(t *testing.T) {
+	svc := &fakeService{tokens: someTokens}
+	rec := call(t, svc, "/v1/auth/google", `{"id_token":"eyJ.x.y","is_adult":true,"accept_terms":true,"locale":"am"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"created":true`) ||
+		!strings.Contains(rec.Body.String(), `"refresh_token"`) || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Errorf("got %d %s", rec.Code, rec.Body)
+	}
+	want := usecase.GoogleSignInInput{IDToken: "eyJ.x.y", IsAdult: true, AcceptTerms: true, Locale: "am"}
+	if svc.gotGoogle != want {
+		t.Errorf("input = %+v", svc.gotGoogle)
+	}
+}
+
+func TestGoogleSignInErrors(t *testing.T) {
+	tests := []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{fmt.Errorf("%w: audience", authdomain.ErrInvalidGoogleToken), http.StatusUnauthorized, CodeInvalidGoogleToken},
+		{authdomain.ErrGoogleEmailNotOwned, http.StatusForbidden, CodeGoogleEmail},
+		{authdomain.ErrIdentityConflict, http.StatusConflict, CodeGoogleConflict},
+		{authdomain.ErrGoogleUnavailable, http.StatusServiceUnavailable, CodeGoogleUnavailable},
+		{validate.Errors{{Field: "is_adult", Code: "must_be_adult", Message: "x"}}, http.StatusUnprocessableEntity, "must_be_adult"},
+	}
+	for _, tt := range tests {
+		rec := call(t, &fakeService{err: tt.err}, "/v1/auth/google", `{"id_token":"t"}`)
+		if rec.Code != tt.status || !strings.Contains(rec.Body.String(), tt.code) {
+			t.Errorf("%v: got %d %s, want %d %s", tt.err, rec.Code, rec.Body, tt.status, tt.code)
+		}
 	}
 }

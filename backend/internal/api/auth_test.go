@@ -75,6 +75,20 @@ func (allowAll) Allow(string) (bool, time.Duration) { return true, 0 }
 
 var testMailbox *mailbox // set by newServer for the test that runs it
 
+// fakeGoogle stands in for Google's ID-token check; any token it does not know
+// fails like a forged or wrong-audience token.
+type fakeGoogle struct{}
+
+func (fakeGoogle) Verify(_ context.Context, token string) (authdomain.GoogleIdentity, error) {
+	switch token {
+	case "token-for-abebe":
+		return authdomain.GoogleIdentity{Subject: "g-abebe", Email: "abebe@gmail.com", EmailVerified: true, Name: "Abebe"}, nil
+	case "token-for-kidist":
+		return authdomain.GoogleIdentity{Subject: "g-kidist", Email: "kidist@gmail.com", EmailVerified: true, Name: "Kidist"}, nil
+	}
+	return authdomain.GoogleIdentity{}, authdomain.ErrInvalidGoogleToken
+}
+
 // Everything real (router, use cases, Argon2id, JWT, PostgreSQL) except a
 // cheaper hash cost, a movable clock, no rate limits and a mailbox instead of SMTP.
 func newServer(t *testing.T) (http.Handler, *pgxpool.Pool, *testClock) {
@@ -93,6 +107,8 @@ func newServer(t *testing.T) (http.Handler, *pgxpool.Pool, *testClock) {
 		Sessions:    authpostgres.NewSessions(pool),
 		Codes:       authpostgres.NewCodes(pool),
 		ResetTokens: authpostgres.NewResetTokens(pool),
+		Identities:  authpostgres.NewIdentities(pool),
+		Google:      fakeGoogle{},
 		Hasher:      argon2id.New(argon2id.Params{MemoryKiB: 64, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 32}),
 		Tokens:      tokens,
 		Notifier:    testMailbox,

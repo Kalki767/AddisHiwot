@@ -25,6 +25,10 @@ const (
 	CodeInvalidToken        = "INVALID_TOKEN"         // malformed, forged or not ours
 	CodeInvalidCode         = "INVALID_CODE"          // wrong, expired or used-up email code
 	CodeInvalidResetToken   = "INVALID_RESET_TOKEN"   // reset token unknown, expired or already used
+	CodeInvalidGoogleToken  = "INVALID_GOOGLE_TOKEN"  // forged, expired or for another app: sign in with Google again
+	CodeGoogleEmail         = "GOOGLE_EMAIL_NOT_SUPPORTED"
+	CodeGoogleConflict      = "GOOGLE_ACCOUNT_CONFLICT"
+	CodeGoogleUnavailable   = "GOOGLE_SIGN_IN_UNAVAILABLE"
 )
 
 // Service is what the handlers need from the use case layer.
@@ -39,6 +43,7 @@ type Service interface {
 	RequestPasswordReset(ctx context.Context, email string) error
 	VerifyPasswordResetCode(ctx context.Context, email, code string) (usecase.ResetGrant, error)
 	CompletePasswordReset(ctx context.Context, token, newPassword string) error
+	SignInWithGoogle(ctx context.Context, in usecase.GoogleSignInInput) (usecase.GoogleSignInResult, error)
 }
 
 // Limits are the rate limiters of the auth routes.
@@ -77,6 +82,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		"POST /v1/auth/password-reset/request":  h.requestPasswordReset,
 		"POST /v1/auth/password-reset/verify":   h.verifyPasswordResetCode,
 		"POST /v1/auth/password-reset/complete": h.completePasswordReset,
+		"POST /v1/auth/google":                  h.google,
 	} {
 		mux.Handle(pattern, httpx.LimitByIP(h.limits.PerIP, h.logger, fn))
 	}
@@ -339,6 +345,54 @@ func (h *Handler) completePasswordReset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type googleRequest struct {
+	IDToken     string `json:"id_token"`
+	IsAdult     bool   `json:"is_adult"`     // needed only when the account is new
+	AcceptTerms bool   `json:"accept_terms"` // needed only when the account is new
+	Locale      string `json:"locale"`
+}
+
+// googleErrors are the answers to Google sign-in failures. Whoever holds a
+// valid Google ID token has shown Google that they own the email, so these
+// answers may differ; with an invalid token they never depend on our data.
+var googleErrors = map[error]*httpx.Error{
+	authdomain.ErrInvalidGoogleToken: httpx.NewError(http.StatusUnauthorized, CodeInvalidGoogleToken,
+		"Google sign-in did not work. Please try again."),
+	authdomain.ErrGoogleEmailNotOwned: httpx.NewError(http.StatusForbidden, CodeGoogleEmail,
+		"This Google account's email cannot be used here. Sign up with your email and a password instead."),
+	authdomain.ErrIdentityConflict: httpx.NewError(http.StatusConflict, CodeGoogleConflict,
+		"This account is linked to a different Google account. Log in with your password or that Google account."),
+	authdomain.ErrGoogleUnavailable: httpx.NewError(http.StatusServiceUnavailable, CodeGoogleUnavailable,
+		"Google sign-in is not available right now. Log in with your email and password."),
+}
+
+// google signs in with a Google ID token, creating or linking the account.
+func (h *Handler) google(w http.ResponseWriter, r *http.Request) {
+	var req googleRequest
+	if err := httpx.DecodeJSON(w, r, &req); err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	res, err := h.svc.SignInWithGoogle(r.Context(), usecase.GoogleSignInInput{
+		IDToken: req.IDToken, IsAdult: req.IsAdult, AcceptTerms: req.AcceptTerms, Locale: req.Locale,
+	})
+	for target, answer := range googleErrors {
+		if errors.Is(err, target) {
+			httpx.WriteError(w, r, h.logger, answer)
+			return
+		}
+	}
+	if err != nil {
+		httpx.WriteError(w, r, h.logger, err)
+		return
+	}
+	writeTokens(w, struct {
+		User    usershttp.User `json:"user"`
+		Tokens  tokensJSON     `json:"tokens"`
+		Created bool           `json:"created"`
+	}{User: usershttp.ToJSON(res.User), Tokens: toTokensJSON(res.Tokens), Created: res.Created})
 }
 
 // RequireAuth lets a request through only with a valid access token in

@@ -17,7 +17,8 @@ var codeSecret = []byte("code-secret-that-is-32-bytes-long!")
 
 // testDeps fills every dependency with an in-memory fake.
 func testDeps(users *fakeUsers, sessions *fakeSessions, hasher authdomain.PasswordHasher, now func() time.Time) Deps {
-	return Deps{Users: users, Sessions: sessions, Codes: newFakeCodes(), ResetTokens: newFakeResetTokens(users, sessions), Hasher: hasher, Tokens: fakeTokens{},
+	return Deps{Users: users, Sessions: sessions, Codes: newFakeCodes(), ResetTokens: newFakeResetTokens(users, sessions),
+		Identities: newFakeIdentities(users, sessions), Google: fakeGoogle{}, Hasher: hasher, Tokens: fakeTokens{},
 		Notifier: &fakeNotifier{}, CodeSecret: codeSecret, Now: now, RefreshTTL: 30 * 24 * time.Hour,
 		Logger: slog.New(slog.DiscardHandler)}
 }
